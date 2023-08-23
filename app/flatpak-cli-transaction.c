@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2018 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -40,6 +40,8 @@ struct _FlatpakCliTransaction
   GError              *first_operation_error;
 
   GHashTable          *eol_actions;
+  GHashTable          *runtime_app_map;
+  GHashTable          *extension_app_map;
 
   int                  rows;
   int                  cols;
@@ -124,7 +126,7 @@ add_new_remote (FlatpakTransaction            *transaction,
 
   if (self->disable_interaction)
     {
-      g_print (_("Configuring %s as new remote '%s'"), url, remote_name);
+      g_print (_("Configuring %s as new remote '%s'\n"), url, remote_name);
       return TRUE;
     }
 
@@ -191,28 +193,6 @@ install_authenticator (FlatpakTransaction            *old_transaction,
     }
 
   return;
-}
-
-static char *
-op_type_to_string (FlatpakTransactionOperationType operation_type)
-{
-  switch (operation_type)
-    {
-    case FLATPAK_TRANSACTION_OPERATION_INSTALL:
-      return _("install");
-
-    case FLATPAK_TRANSACTION_OPERATION_UPDATE:
-      return _("update");
-
-    case FLATPAK_TRANSACTION_OPERATION_INSTALL_BUNDLE:
-      return _("install bundle");
-
-    case FLATPAK_TRANSACTION_OPERATION_UNINSTALL:
-      return _("uninstall");
-
-    default:
-      return "Unknown type"; /* Should not happen */
-    }
 }
 
 static gboolean
@@ -397,7 +377,7 @@ progress_changed_cb (FlatpakTransactionProgress *progress,
         g_print ("\r%s", str->str); /* redraw failed, just update the progress */
     }
   else
-    g_print ("\n%s", str->str);
+    g_print ("%s\n", str->str);
 }
 
 static void
@@ -455,7 +435,7 @@ new_operation (FlatpakTransaction          *transaction,
       redraw (self);
     }
   else
-    g_print ("\r%-*s", self->table_width, text);
+    g_print ("%s\n", text);
 
   g_free (self->progress_msg);
   self->progress_msg = g_steal_pointer (&text);
@@ -492,52 +472,123 @@ operation_error (FlatpakTransaction            *transaction,
   FlatpakTransactionOperationType op_type = flatpak_transaction_operation_get_operation_type (op);
   const char *ref = flatpak_transaction_operation_get_ref (op);
   g_autoptr(FlatpakRef) rref = flatpak_ref_parse (ref, NULL);
-  g_autofree char *msg = NULL;
   gboolean non_fatal = (detail & FLATPAK_TRANSACTION_ERROR_DETAILS_NON_FATAL) != 0;
   g_autofree char *text = NULL;
+  const char *on = "";
+  const char *off = "";
+
+  if (flatpak_fancy_output ())
+    {
+      on = FLATPAK_ANSI_BOLD_ON;
+      off = FLATPAK_ANSI_BOLD_OFF;
+    }
 
   if (g_error_matches (error, FLATPAK_ERROR, FLATPAK_ERROR_SKIPPED))
     {
       set_op_progress (self, op, "⍻");
-      msg = g_strdup_printf (_("Info: %s was skipped"), flatpak_ref_get_name (rref));
+      text = g_strdup_printf (_("Info: %s was skipped"), flatpak_ref_get_name (rref));
       if (flatpak_fancy_output ())
         {
-          flatpak_table_printer_set_cell (self->printer, self->progress_row, 0, msg);
+          flatpak_table_printer_set_cell (self->printer, self->progress_row, 0, text);
           self->progress_row++;
           flatpak_table_printer_add_span (self->printer, "");
           flatpak_table_printer_finish_row (self->printer);
           redraw (self);
         }
       else
-        g_print ("\r%-*s\n", self->table_width, msg); /* override progress, and go to next line */
+        g_print ("%s\n", text);
 
       return TRUE;
     }
 
   set_op_progress (self, op, "✗");
 
+  /* Here we go to great lengths not to split the sentences. See
+   * https://wiki.gnome.org/TranslationProject/DevGuidelines/Never%20split%20sentences
+   */
   if (g_error_matches (error, FLATPAK_ERROR, FLATPAK_ERROR_ALREADY_INSTALLED))
-    msg = g_strdup_printf (_("%s already installed"), flatpak_ref_get_name (rref));
+    {
+      if (non_fatal)
+        text = g_strdup_printf (_("Warning: %s%s%s already installed"),
+                                on, flatpak_ref_get_name (rref), off);
+      else
+        text = g_strdup_printf (_("Error: %s%s%s already installed"),
+                                on, flatpak_ref_get_name (rref), off);
+    }
   else if (g_error_matches (error, FLATPAK_ERROR, FLATPAK_ERROR_NOT_INSTALLED))
-    msg = g_strdup_printf (_("%s not installed"), flatpak_ref_get_name (rref));
-  else if (g_error_matches (error, FLATPAK_ERROR, FLATPAK_ERROR_NOT_INSTALLED))
-    msg = g_strdup_printf (_("%s not installed"), flatpak_ref_get_name (rref));
+    {
+      if (non_fatal)
+        text = g_strdup_printf (_("Warning: %s%s%s not installed"),
+                                on, flatpak_ref_get_name (rref), off);
+      else
+        text = g_strdup_printf (_("Error: %s%s%s not installed"),
+                                on, flatpak_ref_get_name (rref), off);
+    }
   else if (g_error_matches (error, FLATPAK_ERROR, FLATPAK_ERROR_NEED_NEW_FLATPAK))
-    msg = g_strdup_printf (_("%s needs a later flatpak version"), flatpak_ref_get_name (rref));
+    {
+      if (non_fatal)
+        text = g_strdup_printf (_("Warning: %s%s%s needs a later flatpak version"),
+                                on, flatpak_ref_get_name (rref), off);
+      else
+        text = g_strdup_printf (_("Error: %s%s%s needs a later flatpak version"),
+                                on, flatpak_ref_get_name (rref), off);
+    }
   else if (g_error_matches (error, FLATPAK_ERROR, FLATPAK_ERROR_OUT_OF_SPACE))
-    msg = g_strdup (_("Not enough disk space to complete this operation"));
+    {
+      if (non_fatal)
+        text = g_strdup (_("Warning: Not enough disk space to complete this operation"));
+      else
+        text = g_strdup (_("Error: Not enough disk space to complete this operation"));
+    }
   else if (error)
-    msg = g_strdup (error->message);
+    {
+      if (non_fatal)
+        text = g_strdup_printf (_("Warning: %s"), error->message);
+      else
+        text = g_strdup_printf (_("Error: %s"), error->message);
+    }
   else
-    msg = g_strdup (_("(internal error, please report)"));
+    text = g_strdup ("(internal error, please report)");
 
   if (!non_fatal && self->first_operation_error == NULL)
-    g_propagate_prefixed_error (&self->first_operation_error,
-                                g_error_copy (error),
-                                _("Failed to %s %s: "),
-                                op_type_to_string (op_type), flatpak_ref_get_name (rref));
+    {
+      /* Here we go to great lengths not to split the sentences. See
+       * https://wiki.gnome.org/TranslationProject/DevGuidelines/Never%20split%20sentences
+       */
+      switch (op_type)
+        {
+          case FLATPAK_TRANSACTION_OPERATION_INSTALL:
+            g_propagate_prefixed_error (&self->first_operation_error,
+                                        g_error_copy (error),
+                                        _("Failed to install %s%s%s: "),
+                                        on, flatpak_ref_get_name (rref), off);
+            break;
 
-  text = g_strconcat (non_fatal ? _("Warning:") : _("Error:"), " ", msg, NULL);
+          case FLATPAK_TRANSACTION_OPERATION_UPDATE:
+            g_propagate_prefixed_error (&self->first_operation_error,
+                                        g_error_copy (error),
+                                        _("Failed to update %s%s%s: "),
+                                        on, flatpak_ref_get_name (rref), off);
+            break;
+
+          case FLATPAK_TRANSACTION_OPERATION_INSTALL_BUNDLE:
+            g_propagate_prefixed_error (&self->first_operation_error,
+                                        g_error_copy (error),
+                                        _("Failed to install bundle %s%s%s: "),
+                                        on, flatpak_ref_get_name (rref), off);
+            break;
+
+          case FLATPAK_TRANSACTION_OPERATION_UNINSTALL:
+            g_propagate_prefixed_error (&self->first_operation_error,
+                                        g_error_copy (error),
+                                        _("Failed to uninstall %s%s%s: "),
+                                        on, flatpak_ref_get_name (rref), off);
+            break;
+
+          default:
+            g_assert_not_reached ();
+        }
+    }
 
   if (flatpak_fancy_output ())
     {
@@ -548,7 +599,7 @@ operation_error (FlatpakTransaction            *transaction,
       redraw (self);
     }
   else
-    g_printerr ("\r%-*s\n", self->table_width, text);
+    g_printerr ("%s\n", text);
 
   if (!non_fatal && self->stop_on_first_error)
     return FALSE;
@@ -650,6 +701,178 @@ typedef enum {
   EOL_REBASE,        /* Choose to rebase */
 } EolAction;
 
+static void
+print_eol_info_message (FlatpakDir        *dir,
+                        FlatpakDecomposed *ref,
+                        const char        *ref_name,
+                        const char        *rebased_to_ref,
+                        const char        *reason)
+{
+  gboolean is_pinned = flatpak_dir_ref_is_pinned (dir, flatpak_decomposed_get_ref (ref));
+  g_autofree char *ref_branch = flatpak_decomposed_dup_branch (ref);
+  const char *on = "";
+  const char *off = "";
+
+  if (flatpak_fancy_output ())
+    {
+      on = FLATPAK_ANSI_BOLD_ON;
+      off = FLATPAK_ANSI_BOLD_OFF;
+    }
+
+  /* Here we go to great lengths not to split the sentences. See
+   * https://wiki.gnome.org/TranslationProject/DevGuidelines/Never%20split%20sentences
+   */
+  if (rebased_to_ref)
+    {
+      g_autoptr(FlatpakDecomposed) eolr_decomposed = NULL;
+      g_autofree char *eolr_name = NULL;
+      const char *eolr_branch;
+
+      eolr_decomposed = flatpak_decomposed_new_from_ref (rebased_to_ref, NULL);
+
+      /* These are guarantees from FlatpakTransaction */
+      g_assert (eolr_decomposed != NULL);
+      g_assert (flatpak_decomposed_get_kind (ref) == flatpak_decomposed_get_kind (eolr_decomposed));
+
+      eolr_name = flatpak_decomposed_dup_id (eolr_decomposed);
+      eolr_branch = flatpak_decomposed_get_branch (eolr_decomposed);
+
+      if (is_pinned)
+        {
+          /* Only runtimes can be pinned */
+          g_print (_("\nInfo: (pinned) runtime %s%s%s branch %s%s%s is end-of-life, in favor of %s%s%s branch %s%s%s\n"),
+                   on, ref_name, off, on, ref_branch, off, on, eolr_name, off, on, eolr_branch, off);
+        }
+      else
+        {
+          if (flatpak_decomposed_is_runtime (ref))
+            g_print (_("\nInfo: runtime %s%s%s branch %s%s%s is end-of-life, in favor of %s%s%s branch %s%s%s\n"),
+                     on, ref_name, off, on, ref_branch, off, on, eolr_name, off, on, eolr_branch, off);
+          else
+            g_print (_("\nInfo: app %s%s%s branch %s%s%s is end-of-life, in favor of %s%s%s branch %s%s%s\n"),
+                     on, ref_name, off, on, ref_branch, off, on, eolr_name, off, on, eolr_branch, off);
+        }
+    }
+  else if (reason)
+    {
+      g_autofree char *escaped_reason = flatpak_escape_string (reason,
+                                                               FLATPAK_ESCAPE_ALLOW_NEWLINES |
+                                                               FLATPAK_ESCAPE_DO_NOT_QUOTE);
+      if (is_pinned)
+        {
+          /* Only runtimes can be pinned */
+          g_print (_("\nInfo: (pinned) runtime %s%s%s branch %s%s%s is end-of-life, with reason:\n"),
+                   on, ref_name, off, on, ref_branch, off);
+        }
+      else
+        {
+          if (flatpak_decomposed_is_runtime (ref))
+            g_print (_("\nInfo: runtime %s%s%s branch %s%s%s is end-of-life, with reason:\n"),
+                     on, ref_name, off, on, ref_branch, off);
+          else
+            g_print (_("\nInfo: app %s%s%s branch %s%s%s is end-of-life, with reason:\n"),
+                     on, ref_name, off, on, ref_branch, off);
+        }
+      g_print ("   %s\n", escaped_reason);
+    }
+}
+
+static void
+check_current_transaction_for_dependent_apps (GPtrArray          *apps,
+                                              FlatpakTransaction *transaction,
+                                              FlatpakDecomposed  *ref)
+{
+  g_autoptr(FlatpakTransactionOperation) ref_op = NULL;
+  GPtrArray *related_ops;
+
+  ref_op = flatpak_transaction_get_operation_for_ref (transaction, NULL, flatpak_decomposed_get_ref (ref), NULL);
+  g_assert (ref_op != NULL);
+
+  /* Get the related ops to find any apps that use @ref as a runtime or extension */
+  related_ops = flatpak_transaction_operation_get_related_to_ops (ref_op);
+  if (related_ops == NULL)
+    return;
+
+  for (int i = 0; i < related_ops->len; i++)
+    {
+      FlatpakTransactionOperation *related_op = g_ptr_array_index (related_ops, i);
+      const char *related_op_ref = flatpak_transaction_operation_get_ref (related_op);
+      g_autoptr(FlatpakDecomposed) related_op_decomposed = flatpak_decomposed_new_from_ref (related_op_ref, NULL);
+
+      if (related_op_decomposed == NULL)
+        continue;
+      if (flatpak_decomposed_id_is_subref (related_op_decomposed))
+        continue;
+
+      /* Recurse in case @ref was a runtime extension. We need to check since a
+       * runtime can have a runtime extension in its related ops in the
+       * extra-data case, so if we recurse unconditionally it could be infinite
+       * recursion.
+       */
+      if (flatpak_decomposed_is_runtime (related_op_decomposed))
+        {
+          GKeyFile *metadata = flatpak_transaction_operation_get_metadata (ref_op);
+          if (g_key_file_has_group (metadata, FLATPAK_METADATA_GROUP_EXTENSION_OF))
+            check_current_transaction_for_dependent_apps (apps, transaction, related_op_decomposed);
+        }
+      else if (!g_ptr_array_find_with_equal_func (apps, related_op_decomposed, (GEqualFunc)flatpak_decomposed_equal, NULL))
+        g_ptr_array_add (apps, g_steal_pointer (&related_op_decomposed));
+    }
+}
+
+static GPtrArray *
+find_reverse_dep_apps (FlatpakTransaction *transaction,
+                       FlatpakDir         *dir,
+                       FlatpakDecomposed  *ref,
+                       gboolean           *out_is_extension)
+{
+  FlatpakCliTransaction *self = FLATPAK_CLI_TRANSACTION (transaction);
+  g_autoptr(GPtrArray) apps = NULL;
+  g_autoptr(GError) local_error = NULL;
+
+  g_assert (out_is_extension);
+
+  *out_is_extension = flatpak_dir_is_runtime_extension (dir, ref);
+  if (*out_is_extension)
+    {
+      /* Find apps which are using the ref as an extension directly or as an
+       * extension of their runtime.
+       */
+      apps = flatpak_dir_list_app_refs_with_runtime_extension (dir,
+                                                               &self->runtime_app_map,
+                                                               &self->extension_app_map,
+                                                               ref, NULL, &local_error);
+      if (apps == NULL)
+        {
+          g_debug ("Unable to list apps using extension %s: %s\n",
+                   flatpak_decomposed_get_ref (ref), local_error->message);
+          return NULL;
+        }
+    }
+  else
+    {
+      /* Find any apps using the runtime directly */
+      apps = flatpak_dir_list_app_refs_with_runtime (dir, &self->runtime_app_map, ref,
+                                                     NULL, &local_error);
+      if (apps == NULL)
+        {
+          g_debug ("Unable to find apps using runtime %s: %s\n",
+                   flatpak_decomposed_get_ref (ref), local_error->message);
+          return NULL;
+        }
+    }
+
+  /* Also check the current transaction since it's possible the EOL ref
+   * and/or any app(s) that depend on it are not installed. It's also
+   * possible the current transaction updates one of the apps to a
+   * newer runtime but we don't handle that yet
+   * (https://github.com/flatpak/flatpak/issues/4832)
+   */
+  check_current_transaction_for_dependent_apps (apps, transaction, ref);
+
+  return g_steal_pointer (&apps);
+}
+
 static gboolean
 end_of_lifed_with_rebase (FlatpakTransaction *transaction,
                           const char         *remote,
@@ -709,32 +932,24 @@ end_of_lifed_with_rebase (FlatpakTransaction *transaction,
 
   if (action == EOL_UNDECIDED)
     {
-      gboolean is_pinned = flatpak_dir_ref_is_pinned (dir, flatpak_decomposed_get_ref (ref));
-      g_autofree char *branch = flatpak_decomposed_dup_branch (ref);
       action = EOL_IGNORE;
 
-      if (rebased_to_ref)
-        if (is_pinned)
-          g_print (_("Info: (pinned) %s//%s is end-of-life, in favor of %s\n"), name, branch, rebased_to_ref);
-        else
-          g_print (_("Info: %s//%s is end-of-life, in favor of %s\n"), name, branch, rebased_to_ref);
-      else if (reason)
-        {
-          if (is_pinned)
-            g_print (_("Info: (pinned) %s//%s is end-of-life, with reason:\n"), name, branch);
-          else
-            g_print (_("Info: %s//%s is end-of-life, with reason:\n"), name, branch);
-          g_print ("   %s\n", reason);
-        }
+      print_eol_info_message (dir, ref, name, rebased_to_ref, reason);
 
-      if (flatpak_decomposed_is_runtime (ref))
+      if (flatpak_decomposed_is_runtime (ref) && !rebased_to_ref)
         {
-          g_autoptr(GPtrArray) apps = flatpak_dir_list_app_refs_with_runtime (dir, ref, NULL, NULL);
+          gboolean is_extension;
+          g_autoptr(GPtrArray) apps = find_reverse_dep_apps (transaction, dir, ref, &is_extension);
+
           if (apps && apps->len > 0)
             {
-              g_print (_("Applications using this runtime:\n"));
+              if (is_extension)
+                g_print (_("Info: applications using this extension:\n"));
+              else
+                g_print (_("Info: applications using this runtime:\n"));
+
               g_print ("   ");
-              for (int i = 0; i < apps->len; i++)
+              for (guint i = 0; i < apps->len; i++)
                 {
                   FlatpakDecomposed *app_ref = g_ptr_array_index (apps, i);
                   g_autofree char *id = flatpak_decomposed_dup_id (app_ref);
@@ -748,8 +963,9 @@ end_of_lifed_with_rebase (FlatpakTransaction *transaction,
 
       if (rebased_to_ref && remote)
         {
+          /* The context for this prompt is in print_eol_info_message() */
           if (self->disable_interaction ||
-              flatpak_yes_no_prompt (TRUE, _("Replace it with %s?"), rebased_to_ref))
+              flatpak_yes_no_prompt (TRUE, _("Replace?")))
             {
               if (self->disable_interaction)
                 g_print (_("Updating to rebased version\n"));
@@ -762,7 +978,7 @@ end_of_lifed_with_rebase (FlatpakTransaction *transaction,
     }
   else
     {
-        g_debug ("%s is end-of-life, using action from parent ren", name);
+      g_debug ("%s is end-of-life, using action from parent ref", name);
     }
 
   /* Cache for later comparison and reuse */
@@ -772,8 +988,7 @@ end_of_lifed_with_rebase (FlatpakTransaction *transaction,
     {
       g_autoptr(GError) error = NULL;
 
-      if (!flatpak_transaction_add_rebase (transaction, remote, rebased_to_ref, NULL, previous_ids, &error) ||
-          !flatpak_transaction_add_uninstall (transaction, ref_str, &error))
+      if (!flatpak_transaction_add_rebase (transaction, remote, rebased_to_ref, NULL, previous_ids, &error))
         {
           g_propagate_prefixed_error (&self->first_operation_error,
                                       g_error_copy (error),
@@ -782,7 +997,22 @@ end_of_lifed_with_rebase (FlatpakTransaction *transaction,
           return FALSE;
         }
 
-      return TRUE; /* skip update op, in favour of added uninstall */
+      if (!flatpak_transaction_add_uninstall (transaction, ref_str, &error))
+        {
+          /* NOT_INSTALLED error is expected in case the op that triggered this was install not update */
+          if (g_error_matches (error, FLATPAK_ERROR, FLATPAK_ERROR_NOT_INSTALLED))
+            g_clear_error (&error);
+          else
+            {
+              g_propagate_prefixed_error (&self->first_operation_error,
+                                          g_error_copy (error),
+                                          _("Failed to uninstall %s for rebase to %s: "),
+                                          name, rebased_to_ref);
+              return FALSE;
+            }
+        }
+
+      return TRUE; /* skip install/update op of end-of-life ref */
     }
   else /* IGNORE or NO_REBASE */
     return FALSE;
@@ -894,12 +1124,16 @@ print_perm_line (int        idx,
                  int        cols)
 {
   g_autoptr(GString) res = g_string_new (NULL);
+  g_autofree char *escaped_first_perm = NULL;
   int i;
 
-  g_string_append_printf (res, "    [%d] %s", idx, (char *) items->pdata[0]);
+  escaped_first_perm = flatpak_escape_string (items->pdata[0], FLATPAK_ESCAPE_DEFAULT);
+  g_string_append_printf (res, "    [%d] %s", idx, escaped_first_perm);
 
   for (i = 1; i < items->len; i++)
     {
+      g_autofree char *escaped = flatpak_escape_string (items->pdata[i],
+                                                        FLATPAK_ESCAPE_DEFAULT);
       char *p;
       int len;
 
@@ -908,10 +1142,10 @@ print_perm_line (int        idx,
         p = res->str;
 
       len = (res->str + strlen (res->str)) - p;
-      if (len + strlen ((char *) items->pdata[i]) + 2 >= cols)
-        g_string_append_printf (res, ",\n        %s", (char *) items->pdata[i]);
+      if (len + strlen (escaped) + 2 >= cols)
+        g_string_append_printf (res, ",\n        %s", escaped);
       else
-        g_string_append_printf (res, ", %s", (char *) items->pdata[i]);
+        g_string_append_printf (res, ", %s", escaped);
     }
 
   g_print ("%s\n", res->str);
@@ -937,6 +1171,14 @@ print_permissions (FlatpakCliTransaction *self,
   int i, j;
   int rows, cols;
   int table_rows, table_cols;
+  const char *on = "";
+  const char *off = "";
+
+  if (flatpak_fancy_output ())
+    {
+      on = FLATPAK_ANSI_BOLD_ON;
+      off = FLATPAK_ANSI_BOLD_OFF;
+    }
 
   if (metadata == NULL)
     return;
@@ -977,9 +1219,9 @@ print_permissions (FlatpakCliTransaction *self,
   g_print ("\n");
 
   if (old_metadata)
-    g_print (_("New %s permissions:"), flatpak_ref_get_name (rref));
+    g_print (_("New %s%s%s permissions:"), on, flatpak_ref_get_name (rref), off);
   else
-    g_print (_("%s permissions:"), flatpak_ref_get_name (rref));
+    g_print (_("%s%s%s permissions:"), on, flatpak_ref_get_name (rref), off);
 
   g_print ("\n");
 
@@ -1052,7 +1294,7 @@ message_handler (const gchar   *log_domain,
       redraw (self);
     }
   else
-    g_print ("\r%-*s\n", self->table_width, text);
+    g_print ("%s\n", text);
 }
 
 static gboolean
@@ -1064,6 +1306,10 @@ transaction_ready_pre_auth (FlatpakTransaction *transaction)
   int i;
   FlatpakTablePrinter *printer;
   const char *op_shorthand[] = { "i", "u", "i", "r" };
+
+  /* These caches may no longer be valid once the transaction runs */
+  g_clear_pointer (&self->runtime_app_map, g_hash_table_unref);
+  g_clear_pointer (&self->extension_app_map, g_hash_table_unref);
 
   if (ops == NULL)
     return TRUE;
@@ -1309,6 +1555,12 @@ flatpak_cli_transaction_finalize (GObject *object)
 
   g_hash_table_unref (self->eol_actions);
 
+  if (self->runtime_app_map)
+    g_hash_table_unref (self->runtime_app_map);
+
+  if (self->extension_app_map)
+    g_hash_table_unref (self->extension_app_map);
+
   if (self->printer)
     flatpak_table_printer_free (self->printer);
 
@@ -1414,7 +1666,7 @@ flatpak_cli_transaction_run (FlatpakTransaction *transaction,
           redraw (self);
         }
       else
-        g_print ("\r%-*s", self->table_width, text);
+        g_print ("%s", text);
 
       g_print ("\n");
     }

@@ -21,7 +21,7 @@
 #ifndef __FLATPAK_RUN_H__
 #define __FLATPAK_RUN_H__
 
-#include "libglnx/libglnx.h"
+#include "libglnx.h"
 #include "flatpak-common-types-private.h"
 #include "flatpak-context-private.h"
 #include "flatpak-bwrap-private.h"
@@ -199,5 +199,12 @@ gboolean flatpak_run_app (FlatpakDecomposed  *app_ref,
                           GError            **error);
 
 extern const char * const *flatpak_abs_usrmerged_dirs;
+
+gboolean flatpak_run_parse_x11_display (const char  *display,
+                                        int         *family,
+                                        char       **x11_socket,
+                                        char       **remote_host,
+                                        char       **original_display_nr,
+                                        GError     **error);
 
 #endif /* __FLATPAK_RUN_H__ */

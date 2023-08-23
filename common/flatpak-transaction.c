@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2016 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -22,7 +22,6 @@
 
 #include <stdio.h>
 #include <glib/gi18n-lib.h>
-#include <libsoup/soup.h>
 
 #include "flatpak-auth-private.h"
 #include "flatpak-error.h"
@@ -30,6 +29,7 @@
 #include "flatpak-progress-private.h"
 #include "flatpak-transaction-private.h"
 #include "flatpak-utils-private.h"
+#include "flatpak-uri-private.h"
 #include "flatpak-variant-impl-private.h"
 
 /**
@@ -107,6 +107,7 @@ struct _FlatpakTransactionOperation
   gboolean                        failed;
   gboolean                        skip;
   gboolean                        update_only_deploy;
+  gboolean                        pin_on_deploy;
 
   gboolean                        resolved;
   char                           *resolved_commit;
@@ -165,7 +166,6 @@ struct _FlatpakTransactionPrivate
   GPtrArray                   *extra_sideload_repos;
   GList                       *ops;
   GPtrArray                   *added_origin_remotes;
-  GPtrArray                   *added_pinned_runtimes;
 
   GList                       *flatpakrefs; /* GKeyFiles */
   GList                       *bundles; /* BundleData */
@@ -188,6 +188,8 @@ struct _FlatpakTransactionPrivate
   gboolean                     force_uninstall;
   gboolean                     can_run;
   gboolean                     include_unused_uninstall_ops;
+  gboolean                     auto_install_sdk;
+  gboolean                     auto_install_debug;
   char                        *default_arch;
   guint                        max_op;
 
@@ -212,10 +214,10 @@ enum {
   LAST_SIGNAL
 };
 
-enum {
-  PROP_0,
-  PROP_INSTALLATION,
-};
+typedef enum {
+  PROP_INSTALLATION = 1,
+  PROP_NO_INTERACTION,
+} FlatpakTransactionProperty;
 
 struct _FlatpakTransactionProgress
 {
@@ -644,7 +646,8 @@ flatpak_transaction_operation_new (const char                     *remote,
                                    const char                    **previous_ids,
                                    const char                     *commit,
                                    GFile                          *bundle,
-                                   FlatpakTransactionOperationType kind)
+                                   FlatpakTransactionOperationType kind,
+                                   gboolean                        pin_on_deploy)
 {
   FlatpakTransactionOperation *self;
 
@@ -658,6 +661,7 @@ flatpak_transaction_operation_new (const char                     *remote,
   if (bundle)
     self->bundle = g_object_ref (bundle);
   self->kind = kind;
+  self->pin_on_deploy = pin_on_deploy;
 
   return self;
 }
@@ -700,12 +704,13 @@ flatpak_transaction_operation_get_decomposed (FlatpakTransactionOperation *self)
  * flatpak_transaction_operation_get_related_to_ops:
  * @self: a #FlatpakTransactionOperation
  *
- * Gets the operations which caused this operation to be added to the
- * transaction. In the case of a runtime, it's the apps whose runtime it is (and
- * this could be multiple apps, if they all require the same runtime). In
- * the case of a related ref such as an extension, it's the main app or
- * runtime. In the case of a main app or something added to the transaction by
- * flatpak_transaction_add_ref(), %NULL or an empty array will be returned.
+ * Gets the operation(s) which caused this operation to be added to the
+ * transaction. In the case of a runtime, it's the app(s) whose runtime it is,
+ * and/or a runtime extension in the special case of an extra-data extension
+ * that doesn't define the "NoRuntime" key. In the case of a related ref such
+ * as an extension, it's the main app or runtime. In the case of a main app or
+ * something added to the transaction by e.g. flatpak_transaction_add_install()
+ * and which is not otherwise needed, %NULL or an empty array will be returned.
  *
  * Note that an op will be returned even if it’s marked as to be skipped when
  * the transaction is run. Check that using
@@ -1005,7 +1010,6 @@ flatpak_transaction_finalize (GObject *object)
   g_clear_object (&priv->dir);
 
   g_ptr_array_unref (priv->added_origin_remotes);
-  g_ptr_array_unref (priv->added_pinned_runtimes);
 
   g_ptr_array_free (priv->extra_dependency_dirs, TRUE);
   g_ptr_array_free (priv->extra_sideload_repos, TRUE);
@@ -1022,11 +1026,15 @@ flatpak_transaction_set_property (GObject      *object,
   FlatpakTransaction *self = FLATPAK_TRANSACTION (object);
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
 
-  switch (prop_id)
+  switch ((FlatpakTransactionProperty) prop_id)
     {
     case PROP_INSTALLATION:
       g_clear_object (&priv->installation);
       priv->installation = g_value_dup_object (value);
+      break;
+
+    case PROP_NO_INTERACTION:
+      flatpak_transaction_set_no_interaction (self, g_value_get_boolean (value));
       break;
 
     default:
@@ -1060,10 +1068,14 @@ flatpak_transaction_get_property (GObject    *object,
   FlatpakTransaction *self = FLATPAK_TRANSACTION (object);
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
 
-  switch (prop_id)
+  switch ((FlatpakTransactionProperty) prop_id)
     {
     case PROP_INSTALLATION:
       g_value_set_object (value, priv->installation);
+      break;
+
+    case PROP_NO_INTERACTION:
+      g_value_set_boolean (value, flatpak_transaction_get_no_interaction (self));
       break;
 
     default:
@@ -1131,6 +1143,23 @@ flatpak_transaction_class_init (FlatpakTransactionClass *klass)
                                                         "The installation instance",
                                                         FLATPAK_TYPE_INSTALLATION,
                                                         G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_STATIC_STRINGS));
+
+  /**
+   * FlatpakTransaction:no-interaction:
+   *
+   * %TRUE if the transaction is not interactive, %FALSE otherwise.
+   *
+   * See flatpak_transaction_set_no_interaction().
+   *
+   * Since: 1.13.0
+   */
+  g_object_class_install_property (object_class,
+                                   PROP_NO_INTERACTION,
+                                   g_param_spec_boolean ("no-interaction",
+                                                         "No Interaction",
+                                                         "The installation instance",
+                                                         FALSE,
+                                                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY));
 
   /**
    * FlatpakTransaction::new-operation:
@@ -1253,6 +1282,8 @@ flatpak_transaction_class_init (FlatpakTransactionClass *klass)
    * Returns: %TRUE if the operation on this end-of-lifed ref should
    * be skipped (e.g. because the rebased ref has been added to the
    * transaction), %FALSE if it should remain.
+   *
+   * Since: 1.3.2
    */
   signals[END_OF_LIFED_WITH_REBASE] =
     g_signal_new ("end-of-lifed-with-rebase",
@@ -1287,17 +1318,21 @@ flatpak_transaction_class_init (FlatpakTransactionClass *klass)
    * FlatpakTransaction::ready-pre-auth:
    * @object: A #FlatpakTransaction
    *
-   * The ::ready-pre-auth signal is emitted when all the refs involved in the transaction
-   * have been resolved to commits, but we might not necessarily have asked for authenticaion
-   * for all their required operations. This is very similar to the ::ready signal, and you can
-   * chose which one (or both) to use depending on how you want to handle authentication in your user
+   * The ::ready-pre-auth signal is emitted when all the refs involved in the
+   * transaction have been resolved to commits, but we might not necessarily
+   * have asked for authentication for all their required operations. This is
+   * very similar to the ::ready signal, and you can choose which one (or both)
+   * to use depending on how you want to handle authentication in your user
    * interface.
    *
-   * At this point flatpak_transaction_get_operations() will return all the operations
-   * that will be executed as part of the transaction. You can call flatpak_transaction_operation_get_requires_authentication()
-   * to see which will require authentication.
+   * At this point flatpak_transaction_get_operations() will return all the
+   * operations that will be executed as part of the transaction. You can call
+   * flatpak_transaction_operation_get_requires_authentication() to see which
+   * will require authentication.
    *
    * Returns: %TRUE to carry on with the transaction, %FALSE to abort
+   *
+   * Since: 1.9.1
    */
   signals[READY_PRE_AUTH] =
     g_signal_new ("ready-pre-auth",
@@ -1347,7 +1382,7 @@ flatpak_transaction_class_init (FlatpakTransactionClass *klass)
    * The default handler does nothing, and if the authenticator is not installed when
    * the signal handler fails the transaction will error out.
    *
-   * Since: 1.7.4
+   * Since: 1.8.0
    */
   signals[INSTALL_AUTHENTICATOR] =
     g_signal_new ("install-authenticator",
@@ -1452,7 +1487,6 @@ flatpak_transaction_init (FlatpakTransaction *self)
   priv->last_op_for_ref = g_hash_table_new_full ((GHashFunc)flatpak_decomposed_hash, (GEqualFunc)flatpak_decomposed_equal, (GDestroyNotify) flatpak_decomposed_unref, NULL);
   priv->remote_states = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, (GDestroyNotify) flatpak_remote_state_unref);
   priv->added_origin_remotes = g_ptr_array_new_with_free_func (g_free);
-  priv->added_pinned_runtimes = g_ptr_array_new_with_free_func ((GDestroyNotify)flatpak_decomposed_unref);
   priv->extra_dependency_dirs = g_ptr_array_new_with_free_func (g_object_unref);
   priv->extra_sideload_repos = g_ptr_array_new_with_free_func (g_free);
   priv->can_run = TRUE;
@@ -1739,6 +1773,24 @@ flatpak_transaction_set_reinstall (FlatpakTransaction *self,
 }
 
 /**
+ * flatpak_transaction_get_no_interaction:
+ * @self: a #FlatpakTransaction
+ *
+ * Gets whether the transaction is interactive. See
+ * flatpak_transaction_set_no_interaction().
+ *
+ * Returns: %TRUE if the transaction is not interactive, %FALSE otherwise
+ * Since: 1.13.0
+ */
+gboolean
+flatpak_transaction_get_no_interaction (FlatpakTransaction *self)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+
+  return flatpak_dir_get_no_interaction (priv->dir);
+}
+
+/**
  * flatpak_transaction_set_no_interaction:
  * @self: a #FlatpakTransaction
  * @no_interaction: Whether to disallow interactive authorization for operations
@@ -1757,7 +1809,11 @@ flatpak_transaction_set_no_interaction (FlatpakTransaction *self,
 {
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
 
+  if (no_interaction == flatpak_transaction_get_no_interaction (self))
+    return;
+
   flatpak_dir_set_no_interaction (priv->dir, no_interaction);
+  g_object_notify (G_OBJECT (self), "no-interaction");
 }
 
 /**
@@ -1836,6 +1892,84 @@ flatpak_transaction_get_include_unused_uninstall_ops (FlatpakTransaction *self)
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
 
   return priv->include_unused_uninstall_ops;
+}
+
+/**
+ * flatpak_transaction_set_auto_install_sdk:
+ * @self: a #FlatpakTransaction
+ * @auto_install_sdk: whether to auto install SDKs for apps
+ *
+ * When this is set to %TRUE, Flatpak will automatically install the SDK for
+ * each app currently being installed or updated. Does nothing if an uninstall
+ * is taking place.
+ *
+ * Since: 1.13.3
+ */
+void
+flatpak_transaction_set_auto_install_sdk (FlatpakTransaction *self,
+                                          gboolean            auto_install_sdk)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+
+  priv->auto_install_sdk = auto_install_sdk;
+}
+
+/**
+ * flatpak_transaction_get_auto_install_sdk:
+ * @self: a #FlatpakTransaction
+ *
+ * Gets the value set by
+ * flatpak_transaction_set_auto_install_sdk().
+ *
+ * Returns: %TRUE if auto_install_sdk is set, %FALSE otherwise
+ *
+ * Since: 1.13.3
+ */
+gboolean
+flatpak_transaction_get_auto_install_sdk (FlatpakTransaction *self)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+
+  return priv->auto_install_sdk;
+}
+
+/**
+ * flatpak_transaction_set_auto_install_debug:
+ * @self: a #FlatpakTransaction
+ * @auto_install_debug: whether to auto install debug info for apps
+ *
+ * When this is set to %TRUE, Flatpak will automatically install the debug info
+ * for each app currently being installed or updated, as well as its
+ * dependencies. Does nothing if an uninstall is taking place.
+ *
+ * Since: 1.13.3
+ */
+void
+flatpak_transaction_set_auto_install_debug (FlatpakTransaction *self,
+                                            gboolean            auto_install_debug)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+
+  priv->auto_install_debug = auto_install_debug;
+}
+
+/**
+ * flatpak_transaction_get_auto_install_debug:
+ * @self: a #FlatpakTransaction
+ *
+ * Gets the value set by
+ * flatpak_transaction_set_auto_install_debug().
+ *
+ * Returns: %TRUE if auto_install_debug is set, %FALSE otherwise
+ *
+ * Since: 1.13.3
+ */
+gboolean
+flatpak_transaction_get_auto_install_debug (FlatpakTransaction *self)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+
+  return priv->auto_install_debug;
 }
 
 static FlatpakTransactionOperation *
@@ -1930,7 +2064,7 @@ flatpak_transaction_ensure_remote_state (FlatpakTransaction             *self,
         {
           const char *path = g_ptr_array_index (priv->extra_sideload_repos, i);
           g_autoptr(GFile) f = g_file_new_for_path (path);
-          flatpak_remote_state_add_sideload_repo (state, f);
+          flatpak_remote_state_add_sideload_dir (state, f);
         }
     }
 
@@ -1979,6 +2113,7 @@ flatpak_transaction_add_op (FlatpakTransaction             *self,
                             const char                     *commit,
                             GFile                          *bundle,
                             FlatpakTransactionOperationType kind,
+                            gboolean                        pin_on_deploy,
                             GError                        **error)
 {
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
@@ -2008,7 +2143,8 @@ flatpak_transaction_add_op (FlatpakTransaction             *self,
       return op;
     }
 
-  op = flatpak_transaction_operation_new (remote, ref, subpaths, previous_ids, commit, bundle, kind);
+  op = flatpak_transaction_operation_new (remote, ref, subpaths, previous_ids,
+                                          commit, bundle, kind, pin_on_deploy);
   g_hash_table_insert (priv->last_op_for_ref, flatpak_decomposed_ref (ref), op);
 
   priv->ops = g_list_prepend (priv->ops, op);
@@ -2062,7 +2198,8 @@ op_get_related (FlatpakTransaction           *self,
 
   if (transaction_is_local_only (self, op->kind))
     related = flatpak_dir_find_local_related_for_metadata (priv->dir, op->ref,
-                                                           op->remote, op->resolved_metakey,
+                                                           NULL, /* remote could differ from op->remote */
+                                                           op->resolved_metakey,
                                                            NULL, &related_error);
   else
     related = flatpak_dir_find_remote_related_for_metadata (priv->dir, state, op->ref,
@@ -2105,10 +2242,17 @@ add_related (FlatpakTransaction          *self,
           if (!rel->delete)
             continue;
 
-          related_op = flatpak_transaction_add_op (self, op->remote, rel->ref,
+          if (priv->no_deploy)
+            {
+              g_info ("Skipping uninstallation of %s for no deploy transaction",
+                      flatpak_decomposed_get_ref (rel->ref));
+              continue;
+            }
+
+          related_op = flatpak_transaction_add_op (self, rel->remote, rel->ref,
                                                    NULL, NULL, NULL, NULL,
                                                    FLATPAK_TRANSACTION_OPERATION_UNINSTALL,
-                                                   error);
+                                                   FALSE, error);
           if (related_op == NULL)
             return FALSE;
 
@@ -2124,15 +2268,23 @@ add_related (FlatpakTransaction          *self,
         {
           FlatpakRelated *rel = g_ptr_array_index (related, i);
           FlatpakTransactionOperation *related_op;
+          gboolean download = rel->download;
 
-          if (!rel->download)
+          if (!download)
+            {
+              g_autofree char *id = flatpak_decomposed_dup_id (rel->ref);
+              if (priv->auto_install_debug && g_str_has_suffix (id, ".Debug"))
+                download = TRUE;
+            }
+
+          if (!download)
             continue;
 
-          related_op = flatpak_transaction_add_op (self, op->remote, rel->ref,
+          related_op = flatpak_transaction_add_op (self, rel->remote, rel->ref,
                                                    (const char **) rel->subpaths,
                                                    NULL, NULL, NULL,
                                                    FLATPAK_TRANSACTION_OPERATION_INSTALL_OR_UPDATE,
-                                                   error);
+                                                   FALSE, error);
           if (related_op == NULL)
             return FALSE;
 
@@ -2328,6 +2480,67 @@ op_get_runtime_ref (FlatpakTransactionOperation *op)
   return decomposed;
 }
 
+static FlatpakDecomposed *
+op_get_sdk_ref (FlatpakTransactionOperation *op)
+{
+  g_autofree char *sdk_pref = NULL;
+  FlatpakDecomposed *decomposed;
+
+  if (!op->resolved_metakey || !flatpak_decomposed_is_app (op->ref))
+    return NULL;
+
+  sdk_pref = g_key_file_get_string (op->resolved_metakey, "Application", "sdk", NULL);
+  if (sdk_pref == NULL)
+    return NULL;
+
+  decomposed = flatpak_decomposed_new_from_pref (FLATPAK_KINDS_RUNTIME, sdk_pref, NULL);
+  if (decomposed == NULL)
+    g_debug ("Invalid runtime ref %s in metadata", sdk_pref);
+
+  return decomposed;
+}
+
+static gboolean
+add_new_dep_op (FlatpakTransaction           *self,
+                FlatpakTransactionOperation  *op,
+                FlatpakDecomposed            *dep_ref,
+                FlatpakTransactionOperation **dep_op,
+                GError                      **error)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+  g_autofree char *dep_remote = NULL;
+
+  if (!ref_is_installed (self, dep_ref))
+    {
+      g_debug ("Installing dependency %s of %s", flatpak_decomposed_get_pref (dep_ref),
+               flatpak_decomposed_get_pref (op->ref));
+      dep_remote = find_runtime_remote (self, op->ref, op->remote, dep_ref, op->kind, NULL, error);
+      if (dep_remote == NULL)
+        return FALSE;
+
+      *dep_op = flatpak_transaction_add_op (self, dep_remote, dep_ref, NULL, NULL, NULL, NULL,
+                                            FLATPAK_TRANSACTION_OPERATION_INSTALL_OR_UPDATE, FALSE, error);
+      if (*dep_op == NULL)
+        return FALSE;
+    }
+  else
+    {
+      /* Update if in same dir */
+      if (dir_ref_is_installed (priv->dir, dep_ref, &dep_remote, NULL))
+        {
+          g_debug ("Updating dependency %s of %s", flatpak_decomposed_get_pref (dep_ref),
+                   flatpak_decomposed_get_pref (op->ref));
+          *dep_op = flatpak_transaction_add_op (self, dep_remote, dep_ref, NULL, NULL, NULL, NULL,
+                                                FLATPAK_TRANSACTION_OPERATION_UPDATE, FALSE, error);
+          if (*dep_op == NULL)
+            return FALSE;
+          (*dep_op)->non_fatal = TRUE;
+        }
+    }
+
+  return TRUE;
+}
+
 static gboolean
 add_deps (FlatpakTransaction          *self,
           FlatpakTransactionOperation *op,
@@ -2335,7 +2548,6 @@ add_deps (FlatpakTransaction          *self,
 {
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
   g_autoptr(FlatpakDecomposed) runtime_ref = NULL;
-  g_autofree char *runtime_remote = NULL;
   FlatpakTransactionOperation *runtime_op = NULL;
 
   if (!op->resolved_metakey)
@@ -2362,30 +2574,8 @@ add_deps (FlatpakTransaction          *self,
 
   if (runtime_op == NULL)
     {
-      if (!ref_is_installed (self, runtime_ref))
-        {
-          runtime_remote = find_runtime_remote (self, op->ref, op->remote, runtime_ref, op->kind, NULL, error);
-          if (runtime_remote == NULL)
-            return FALSE;
-
-          runtime_op = flatpak_transaction_add_op (self, runtime_remote, runtime_ref, NULL, NULL, NULL, NULL,
-                                                   FLATPAK_TRANSACTION_OPERATION_INSTALL_OR_UPDATE, error);
-          if (runtime_op == NULL)
-            return FALSE;
-        }
-      else
-        {
-          /* Update if in same dir */
-          if (dir_ref_is_installed (priv->dir, runtime_ref, &runtime_remote, NULL))
-            {
-              g_debug ("Updating dependent runtime %s", flatpak_decomposed_get_pref (runtime_ref));
-              runtime_op = flatpak_transaction_add_op (self, runtime_remote, runtime_ref, NULL, NULL, NULL, NULL,
-                                                       FLATPAK_TRANSACTION_OPERATION_UPDATE, error);
-              if (runtime_op == NULL)
-                return FALSE;
-              runtime_op->non_fatal = TRUE;
-            }
-        }
+      if (!add_new_dep_op (self, op, runtime_ref, &runtime_op, error))
+        return FALSE;
     }
 
   /* Install/Update the runtime before the app */
@@ -2401,6 +2591,28 @@ add_deps (FlatpakTransaction          *self,
       run_operation_before (runtime_op, op, 2);
     }
 
+  if (priv->auto_install_sdk)
+    {
+      g_autoptr(FlatpakDecomposed) sdk_ref = NULL;
+
+      sdk_ref = op_get_sdk_ref (op);
+      if (sdk_ref != NULL)
+        {
+          FlatpakTransactionOperation *sdk_op = flatpak_transaction_get_last_op_for_ref (self, sdk_ref);
+          if (sdk_op == NULL)
+            {
+              if (!add_new_dep_op (self, op, sdk_ref, &sdk_op, error))
+                return FALSE;
+            }
+
+          if (sdk_op->kind != FLATPAK_TRANSACTION_OPERATION_UNINSTALL)
+            {
+              flatpak_transaction_operation_add_related_to_op (sdk_op, op);
+              run_operation_before (sdk_op, op, 2);
+            }
+        }
+    }
+
   return TRUE;
 }
 
@@ -2414,6 +2626,7 @@ flatpak_transaction_add_ref (FlatpakTransaction             *self,
                              FlatpakTransactionOperationType kind,
                              GFile                          *bundle,
                              const char                     *external_metadata,
+                             gboolean                        pin_on_deploy,
                              GError                        **error)
 {
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
@@ -2504,6 +2717,13 @@ flatpak_transaction_add_ref (FlatpakTransaction             *self,
     }
   else if (kind == FLATPAK_TRANSACTION_OPERATION_UNINSTALL)
     {
+      /* Skip uninstall for no deploy transactions. */
+      if (priv->no_deploy)
+        {
+          g_info ("Skipping uninstallation of %s for no deploy transaction", pref);
+          return TRUE;
+        }
+
       if (!dir_ref_is_installed (priv->dir, ref, &origin, NULL))
         return flatpak_fail_error (error, FLATPAK_ERROR_NOT_INSTALLED,
                                    _("%s not installed"), pref);
@@ -2525,12 +2745,13 @@ flatpak_transaction_add_ref (FlatpakTransaction             *self,
         return FALSE;
     }
 
-  op = flatpak_transaction_add_op (self, remote, ref, subpaths, previous_ids, commit, bundle, kind, error);
+  op = flatpak_transaction_add_op (self, remote, ref, subpaths, previous_ids,
+                                   commit, bundle, kind, pin_on_deploy, error);
   if (op == NULL)
     return FALSE;
 
   if (external_metadata)
-    op->external_metadata = g_bytes_new (external_metadata, strlen (external_metadata) + 1);
+    op->external_metadata = g_bytes_new (external_metadata, strlen (external_metadata));
 
   return TRUE;
 }
@@ -2562,6 +2783,7 @@ flatpak_transaction_add_install (FlatpakTransaction *self,
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
   g_autoptr(FlatpakDecomposed) decomposed = NULL;
   const char *all_paths[] = { NULL };
+  gboolean pin_on_deploy;
 
   g_return_val_if_fail (ref != NULL, FALSE);
   g_return_val_if_fail (remote != NULL, FALSE);
@@ -2574,24 +2796,12 @@ flatpak_transaction_add_install (FlatpakTransaction *self,
   if (subpaths == NULL)
     subpaths = all_paths;
 
-  if (!flatpak_transaction_add_ref (self, remote, decomposed, subpaths, NULL, NULL, FLATPAK_TRANSACTION_OPERATION_INSTALL, NULL, NULL, error))
+  pin_on_deploy = flatpak_decomposed_is_runtime (decomposed) && !priv->disable_auto_pin;
+
+  if (!flatpak_transaction_add_ref (self, remote, decomposed, subpaths, NULL, NULL,
+                                    FLATPAK_TRANSACTION_OPERATION_INSTALL,
+                                    NULL, NULL, pin_on_deploy, error))
     return FALSE;
-
-  /* Pin runtimes that are installed explicitly rather than pulled as
-   * dependencies so they are not automatically removed. */
-  if (flatpak_decomposed_is_runtime (decomposed) && !priv->disable_auto_pin)
-    {
-      gboolean already_pinned;
-
-      if (!flatpak_dir_config_append_pattern (priv->dir, "pinned", flatpak_decomposed_get_ref (decomposed), TRUE, &already_pinned, error))
-        return FALSE;
-
-      if (!already_pinned)
-        {
-          g_ptr_array_add (priv->added_pinned_runtimes, flatpak_decomposed_ref (decomposed));
-          flatpak_installation_drop_caches (priv->installation, NULL, NULL);
-        }
-    }
 
   return TRUE;
 }
@@ -2625,8 +2835,10 @@ flatpak_transaction_add_rebase (FlatpakTransaction *self,
                                 const char        **previous_ids,
                                 GError            **error)
 {
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
   const char *all_paths[] = { NULL };
   g_autoptr(FlatpakDecomposed) decomposed = NULL;
+  g_autofree char *installed_origin = NULL;
 
   g_return_val_if_fail (ref != NULL, FALSE);
   g_return_val_if_fail (remote != NULL, FALSE);
@@ -2641,7 +2853,10 @@ flatpak_transaction_add_rebase (FlatpakTransaction *self,
   if (subpaths == NULL)
     subpaths = all_paths;
 
-  return flatpak_transaction_add_ref (self, remote, decomposed, subpaths, previous_ids, NULL, FLATPAK_TRANSACTION_OPERATION_INSTALL_OR_UPDATE, NULL, NULL, error);
+  if (dir_ref_is_installed (priv->dir, decomposed, &installed_origin, NULL))
+    remote = installed_origin;
+
+  return flatpak_transaction_add_ref (self, remote, decomposed, subpaths, previous_ids, NULL, FLATPAK_TRANSACTION_OPERATION_INSTALL_OR_UPDATE, NULL, NULL, FALSE, error);
 }
 
 /**
@@ -2735,7 +2950,7 @@ flatpak_transaction_add_update (FlatpakTransaction *self,
     return FALSE;
 
   /* Note: we implement the merge when subpaths == NULL in flatpak_transaction_add_ref() */
-  return flatpak_transaction_add_ref (self, NULL, decomposed, subpaths, NULL, commit, FLATPAK_TRANSACTION_OPERATION_UPDATE, NULL, NULL, error);
+  return flatpak_transaction_add_ref (self, NULL, decomposed, subpaths, NULL, commit, FLATPAK_TRANSACTION_OPERATION_UPDATE, NULL, NULL, FALSE, error);
 }
 
 /**
@@ -2744,7 +2959,8 @@ flatpak_transaction_add_update (FlatpakTransaction *self,
  * @ref: the ref
  * @error: return location for a #GError
  *
- * Adds uninstalling the given ref to this transaction.
+ * Adds uninstalling the given ref to this transaction. If the transaction is
+ * set to not deploy updates, the request is ignored.
  *
  * Returns: %TRUE on success; %FALSE with @error set on failure.
  */
@@ -2761,7 +2977,7 @@ flatpak_transaction_add_uninstall (FlatpakTransaction *self,
   if (decomposed == NULL)
     return FALSE;
 
-  return flatpak_transaction_add_ref (self, NULL, decomposed, NULL, NULL, NULL, FLATPAK_TRANSACTION_OPERATION_UNINSTALL, NULL, NULL, error);
+  return flatpak_transaction_add_ref (self, NULL, decomposed, NULL, NULL, NULL, FLATPAK_TRANSACTION_OPERATION_UNINSTALL, NULL, NULL, FALSE, error);
 }
 
 static gboolean
@@ -2873,7 +3089,7 @@ flatpak_transaction_add_auto_install (FlatpakTransaction *self,
 
                   if (!flatpak_transaction_add_ref (self, remote, auto_install_ref, NULL, NULL, NULL,
                                                     FLATPAK_TRANSACTION_OPERATION_INSTALL_OR_UPDATE,
-                                                    NULL, NULL,
+                                                    NULL, NULL, FALSE,
                                                     &local_error))
                     g_debug ("Failed to add auto-install ref %s: %s", flatpak_decomposed_get_ref (auto_install_ref),
                              local_error->message);
@@ -2947,7 +3163,7 @@ load_deployed_metadata (FlatpakTransaction *self, FlatpakDecomposed *ref, char *
       return NULL;
     }
 
-  return g_bytes_new_take (g_steal_pointer (&metadata_contents), metadata_contents_length + 1);
+  return g_bytes_new_take (g_steal_pointer (&metadata_contents), metadata_contents_length);
 }
 
 static void
@@ -2967,12 +3183,13 @@ emit_eol_and_maybe_skip (FlatpakTransaction          *self,
   g_signal_emit (self, signals[END_OF_LIFED_WITH_REBASE], 0, op->remote, flatpak_decomposed_get_ref (op->ref), op->eol, op->eol_rebase, previous_ids, &op->skip);
 }
 
-static void
+static gboolean
 mark_op_resolved (FlatpakTransactionOperation *op,
                   const char                  *commit,
                   GFile                       *sideload_path,
                   GBytes                      *metadata,
-                  GBytes                      *old_metadata)
+                  GBytes                      *old_metadata,
+                  GError                     **error)
 {
   g_debug ("marking op %s:%s resolved to %s", kind_to_str (op->kind), flatpak_decomposed_get_ref (op->ref), commit ? commit : "-");
 
@@ -2994,13 +3211,12 @@ mark_op_resolved (FlatpakTransactionOperation *op,
   if (metadata)
     {
       g_autoptr(GKeyFile) metakey = g_key_file_new ();
-      if (g_key_file_load_from_bytes (metakey, metadata, G_KEY_FILE_NONE, NULL))
-        {
-          op->resolved_metadata = g_bytes_ref (metadata);
-          op->resolved_metakey = g_steal_pointer (&metakey);
-        }
-      else
-        g_message ("Warning: Failed to parse metadata for %s\n", flatpak_decomposed_get_ref (op->ref));
+      if (!g_key_file_load_from_bytes (metakey, metadata, G_KEY_FILE_NONE, NULL))
+        return flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA,
+                                   "Metadata for %s is invalid", flatpak_decomposed_get_ref (op->ref));
+
+      op->resolved_metadata = g_bytes_ref (metadata);
+      op->resolved_metakey = g_steal_pointer (&metakey);
     }
   if (old_metadata)
     {
@@ -3011,31 +3227,40 @@ mark_op_resolved (FlatpakTransactionOperation *op,
           op->resolved_old_metakey = g_steal_pointer (&metakey);
         }
       else
-        g_message ("Warning: Failed to parse old metadata for %s\n", flatpak_decomposed_get_ref (op->ref));
+        {
+          /* This shouldn't happen, but a NULL old metadata is safe (all permisssions are considered new) */
+          g_message ("Warning: Failed to parse old metadata for %s\n", flatpak_decomposed_get_ref (op->ref));
+        }
     }
+
+  return TRUE;
 }
 
-static void
+static gboolean
 resolve_op_end (FlatpakTransaction *self,
                 FlatpakTransactionOperation *op,
                 const char *checksum,
                 GFile *sideload_path,
-                GBytes *metadata_bytes)
+                GBytes *metadata_bytes,
+                GError **error)
 {
   g_autoptr(GBytes) old_metadata_bytes = NULL;
 
   old_metadata_bytes = load_deployed_metadata (self, op->ref, NULL, NULL);
-  mark_op_resolved (op, checksum, sideload_path, metadata_bytes, old_metadata_bytes);
+  if (!mark_op_resolved (op, checksum, sideload_path, metadata_bytes, old_metadata_bytes, error))
+    return FALSE;
   emit_eol_and_maybe_skip (self, op);
+  return TRUE;
  }
 
 
-static void
+static gboolean
 resolve_op_from_commit (FlatpakTransaction *self,
                         FlatpakTransactionOperation *op,
                         const char *checksum,
                         GFile *sideload_path,
-                        GVariant *commit_data)
+                        GVariant *commit_data,
+                        GError **error)
 {
   g_autoptr(GBytes) metadata_bytes = NULL;
   g_autoptr(GVariant) commit_metadata = NULL;
@@ -3046,9 +3271,11 @@ resolve_op_from_commit (FlatpakTransaction *self,
   commit_metadata = g_variant_get_child_value (commit_data, 0);
   g_variant_lookup (commit_metadata, "xa.metadata", "&s", &xa_metadata);
   if (xa_metadata == NULL)
-    g_message ("Warning: No xa.metadata in local commit %s ref %s", checksum, flatpak_decomposed_get_ref (op->ref));
-  else
-    metadata_bytes = g_bytes_new (xa_metadata, strlen (xa_metadata) + 1);
+    return flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA,
+                               "No xa.metadata in local commit %s ref %s",
+                               checksum, flatpak_decomposed_get_ref (op->ref));
+
+  metadata_bytes = g_bytes_new (xa_metadata, strlen (xa_metadata));
 
   if (g_variant_lookup (commit_metadata, "xa.download-size", "t", &download_size))
     op->download_size = GUINT64_FROM_BE (download_size);
@@ -3058,15 +3285,32 @@ resolve_op_from_commit (FlatpakTransaction *self,
   g_variant_lookup (commit_metadata, OSTREE_COMMIT_META_KEY_ENDOFLIFE, "s", &op->eol);
   g_variant_lookup (commit_metadata, OSTREE_COMMIT_META_KEY_ENDOFLIFE_REBASE, "s", &op->eol_rebase);
 
-  resolve_op_end (self, op, checksum, sideload_path, metadata_bytes);
+  if (op->eol_rebase)
+    {
+      g_autoptr(FlatpakDecomposed) eolr_decomposed = NULL;
+      eolr_decomposed = flatpak_decomposed_new_from_ref (op->eol_rebase, error);
+      if (!eolr_decomposed)
+        return FALSE;
+      if (flatpak_decomposed_get_kind (op->ref) != flatpak_decomposed_get_kind (eolr_decomposed))
+        return flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA,
+                                   "end-of-life-rebase on commit %s has the wrong type (%s -> %s)",
+                                   checksum, flatpak_decomposed_get_ref (op->ref),
+                                   flatpak_decomposed_get_ref (eolr_decomposed));
+    }
+
+  return resolve_op_end (self, op, checksum, sideload_path, metadata_bytes, error);
 }
 
+/* NOTE: In case of non-available summary this returns FALSE with a
+ * NULL error, but for other error cases it will be set.
+ */
 static gboolean
 try_resolve_op_from_metadata (FlatpakTransaction *self,
                               FlatpakTransactionOperation *op,
                               const char *checksum,
                               GFile *sideload_path,
-                              FlatpakRemoteState *state)
+                              FlatpakRemoteState *state,
+                              GError **error)
 {
   g_autoptr(GBytes) metadata_bytes = NULL;
   guint64 download_size = 0;
@@ -3088,7 +3332,7 @@ try_resolve_op_from_metadata (FlatpakTransaction *self,
                                           &download_size, &installed_size, &metadata, NULL))
       return FALSE;
 
-  metadata_bytes = g_bytes_new (metadata, strlen (metadata) + 1);
+  metadata_bytes = g_bytes_new (metadata, strlen (metadata));
 
   if (flatpak_remote_state_lookup_ref (state, flatpak_decomposed_get_ref (op->ref),
                                        NULL, NULL, &info, NULL, NULL))
@@ -3104,10 +3348,22 @@ try_resolve_op_from_metadata (FlatpakTransaction *self,
       op->eol = g_strdup (var_metadata_lookup_string (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_ENDOFLINE, NULL));
       op->eol_rebase = g_strdup (var_metadata_lookup_string (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_ENDOFLINE_REBASE, NULL));
       op->token_type = GINT32_FROM_LE (var_metadata_lookup_int32 (sparse_cache, FLATPAK_SPARSE_CACHE_KEY_TOKEN_TYPE, op->token_type));
+
+      if (op->eol_rebase)
+        {
+          g_autoptr(FlatpakDecomposed) eolr_decomposed = NULL;
+          eolr_decomposed = flatpak_decomposed_new_from_ref (op->eol_rebase, error);
+          if (!eolr_decomposed)
+            return FALSE;
+          if (flatpak_decomposed_get_kind (op->ref) != flatpak_decomposed_get_kind (eolr_decomposed))
+            return flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA,
+                                       "end-of-life-rebase on commit %s has the wrong type (%s -> %s)",
+                                       checksum, flatpak_decomposed_get_ref (op->ref),
+                                       flatpak_decomposed_get_ref (eolr_decomposed));
+        }
     }
 
-  resolve_op_end (self, op, checksum, sideload_path, metadata_bytes);
-  return TRUE;
+  return resolve_op_end (self, op, checksum, sideload_path, metadata_bytes, error);
 }
 
 static gboolean
@@ -3150,7 +3406,8 @@ resolve_ops (FlatpakTransaction *self,
            * checksum we got was the version already installed.
            */
           g_assert (op->resolved_commit != NULL);
-          mark_op_resolved (op, op->resolved_commit, NULL, NULL, NULL);
+          if (!mark_op_resolved (op, op->resolved_commit, NULL, NULL, NULL, error))
+            return FALSE;
           continue;
         }
 
@@ -3164,14 +3421,16 @@ resolve_ops (FlatpakTransaction *self,
               op->skip = TRUE;
               continue;
             }
-          mark_op_resolved (op, checksum, NULL, metadata_bytes, NULL);
+          if (!mark_op_resolved (op, checksum, NULL, metadata_bytes, NULL, error))
+            return FALSE;
           continue;
         }
 
       if (op->kind == FLATPAK_TRANSACTION_OPERATION_INSTALL_BUNDLE)
         {
           g_assert (op->commit != NULL);
-          mark_op_resolved (op, op->commit, NULL, op->external_metadata, NULL);
+          if (!mark_op_resolved (op, op->commit, NULL, op->external_metadata, NULL, error))
+            return FALSE;
           continue;
         }
 
@@ -3202,7 +3461,8 @@ resolve_ops (FlatpakTransaction *self,
           if (commit_data == NULL)
             return FALSE;
 
-          resolve_op_from_commit (self, op, checksum, NULL, commit_data);
+          if (!resolve_op_from_commit (self, op, checksum, NULL, commit_data, error))
+            return FALSE;
         }
       else
         {
@@ -3261,9 +3521,16 @@ resolve_ops (FlatpakTransaction *self,
             }
 
           /* First try to resolve via metadata (if remote is available and its metadata matches the commit version) */
-          if (!try_resolve_op_from_metadata (self, op, checksum, sideload_path, state))
+          if (!try_resolve_op_from_metadata (self, op, checksum, sideload_path, state, &local_error))
             {
-              /* Else try to load the commit object.
+              if (local_error)
+                {
+                  /* Actual error, not just missing from summary */
+                  g_propagate_error (error, g_steal_pointer (&local_error));
+                  return FALSE;
+                }
+
+              /* Missing from summary, try to load the commit object.
                * Note, we don't have a token here, so this will not work for authenticated apps.
                * We handle this by catching the 401 http status and retrying. */
               g_autoptr(GVariant) commit_data = NULL;
@@ -3299,7 +3566,8 @@ resolve_ops (FlatpakTransaction *self,
                   return FALSE;
                 }
 
-              resolve_op_from_commit (self, op, checksum, sideload_path, commit_data);
+              if (!resolve_op_from_commit (self, op, checksum, sideload_path, commit_data, error))
+                return FALSE;
             }
         }
     }
@@ -3892,6 +4160,71 @@ flatpak_transaction_get_current_operation (FlatpakTransaction *self)
 }
 
 /**
+ * flatpak_transaction_get_operation_for_ref:
+ * @self: a #FlatpakTransaction
+ * @remote: (nullable): a remote name
+ * @ref: a ref
+ * @error: return location for an error
+ *
+ * Gets the operation for @ref, if any match. If @remote is non-%NULL, only an
+ * operation for that remote will be returned. If remote is %NULL and the
+ * transaction has more than one operation for @ref from different remotes, an
+ * error will be returned.
+ *
+ * Returns: (transfer full): the #FlatpakTransactionOperation for @ref, or
+ *   %NULL with @error set
+ * Since: 1.13.3
+ */
+FlatpakTransactionOperation *
+flatpak_transaction_get_operation_for_ref (FlatpakTransaction *self,
+                                           const char         *remote,
+                                           const char         *ref,
+                                           GError            **error)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+  g_autoptr(FlatpakDecomposed) decomposed_ref = NULL;
+  g_autoptr(FlatpakTransactionOperation) matching_op = NULL;
+  GList *l;
+
+  g_return_val_if_fail (ref != NULL, NULL);
+
+  decomposed_ref = flatpak_decomposed_new_from_ref (ref, error);
+  if (decomposed_ref == NULL)
+    return NULL;
+
+  for (l = priv->ops; l != NULL; l = l->next)
+    {
+      FlatpakTransactionOperation *op = l->data;
+
+      if (remote != NULL && g_strcmp0 (remote, op->remote) != 0)
+        continue;
+
+      if (flatpak_decomposed_equal (op->ref, decomposed_ref))
+        {
+          if (matching_op == NULL)
+            matching_op = g_object_ref (op);
+          else
+            {
+              flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA,
+                                  _("Ref %s from %s matches more than one transaction operation"),
+                                  ref, remote ? remote : _("any remote"));
+              return NULL;
+            }
+        }
+    }
+
+  if (matching_op == NULL)
+    {
+      flatpak_fail_error (error, FLATPAK_ERROR_REF_NOT_FOUND,
+                          _("No transaction operation found for ref %s from %s"),
+                          ref, remote ? remote : _("any remote"));
+      return NULL;
+    }
+
+  return g_steal_pointer (&matching_op);
+}
+
+/**
  * flatpak_transaction_get_installation:
  * @self: a #FlatpakTransactionOperation
  *
@@ -3924,7 +4257,10 @@ remote_is_already_configured (FlatpakTransaction *self,
 }
 
 static gboolean
-handle_suggested_remote_name (FlatpakTransaction *self, GKeyFile *keyfile, GError **error)
+handle_suggested_remote_name (FlatpakTransaction *self,
+                              GKeyFile *keyfile,
+                              GKeyFile *runtime_repo_keyfile, /* nullable */
+                              GError **error)
 {
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
   g_autofree char *suggested_name = NULL;
@@ -3959,7 +4295,16 @@ handle_suggested_remote_name (FlatpakTransaction *self, GKeyFile *keyfile, GErro
                  name, suggested_name, url, &res);
   if (res)
     {
-      config = flatpak_parse_repofile (suggested_name, TRUE, keyfile, &gpg_key, NULL, error);
+      g_autofree char *runtime_repo_url = NULL;
+
+      /* In case the runtime repo is the same repo, use its title, comment,
+       * description, etc. since flatpakref files don't have those fields. */
+      runtime_repo_url = g_key_file_get_string (runtime_repo_keyfile, FLATPAK_REPO_GROUP, FLATPAK_REPO_URL_KEY, NULL);
+      if (runtime_repo_url != NULL && flatpak_uri_equal (runtime_repo_url, url))
+        config = flatpak_parse_repofile (suggested_name, FALSE, runtime_repo_keyfile, &gpg_key, NULL, error);
+      else
+        config = flatpak_parse_repofile (suggested_name, TRUE, keyfile, &gpg_key, NULL, error);
+
       if (config == NULL)
         return FALSE;
 
@@ -3976,28 +4321,17 @@ handle_suggested_remote_name (FlatpakTransaction *self, GKeyFile *keyfile, GErro
 }
 
 static gboolean
-handle_runtime_repo_deps (FlatpakTransaction *self,
-                          const char         *id,
-                          const char         *dep_url,
-                          GCancellable       *cancellable,
-                          GError            **error)
+load_flatpakrepo_file (FlatpakTransaction *self,
+                       const char         *dep_url,
+                       GKeyFile          **out_keyfile,
+                       GCancellable       *cancellable,
+                       GError            **error)
 {
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
   g_autoptr(GBytes) dep_data = NULL;
-  g_autofree char *runtime_url = NULL;
-  g_autofree char *new_remote = NULL;
-  g_autofree char *basename = NULL;
-  g_autoptr(SoupURI) uri = NULL;
-  g_auto(GStrv) remotes = NULL;
-  g_autoptr(GKeyFile) config = NULL;
   g_autoptr(GKeyFile) dep_keyfile = g_key_file_new ();
-  g_autoptr(GBytes) gpg_key = NULL;
-  g_autofree char *group = NULL;
   g_autoptr(GError) local_error = NULL;
-  g_autoptr(SoupSession) soup_session = NULL;
-  char *t;
-  int i;
-  gboolean res;
+  g_autoptr(FlatpakHttpSession) http_session = NULL;
 
   if (priv->disable_deps)
     return TRUE;
@@ -4007,8 +4341,8 @@ handle_runtime_repo_deps (FlatpakTransaction *self,
       !g_str_has_prefix (dep_url, "file:"))
     return flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA, _("Flatpakrepo URL %s not file, HTTP or HTTPS"), dep_url);
 
-  soup_session = flatpak_create_soup_session (PACKAGE_STRING);
-  dep_data = flatpak_load_uri (soup_session, dep_url, 0, NULL, NULL, NULL, NULL, cancellable, error);
+  http_session = flatpak_create_http_session (PACKAGE_STRING);
+  dep_data = flatpak_load_uri (http_session, dep_url, 0, NULL, NULL, NULL, NULL, cancellable, error);
   if (dep_data == NULL)
     {
       g_prefix_error (error, _("Can't load dependent file %s: "), dep_url);
@@ -4021,8 +4355,40 @@ handle_runtime_repo_deps (FlatpakTransaction *self,
                                   0, &local_error))
     return flatpak_fail_error (error, FLATPAK_ERROR_INVALID_DATA, _("Invalid .flatpakrepo: %s"), local_error->message);
 
-  uri = soup_uri_new (dep_url);
-  basename = g_path_get_basename (soup_uri_get_path (uri));
+  if (out_keyfile)
+    *out_keyfile = g_steal_pointer (&dep_keyfile);
+
+  return TRUE;
+}
+
+static gboolean
+handle_runtime_repo_deps (FlatpakTransaction *self,
+                          const char         *id,
+                          const char         *dep_url,
+                          GKeyFile           *dep_keyfile,
+                          GCancellable       *cancellable,
+                          GError            **error)
+{
+  FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
+  g_autofree char *runtime_url = NULL;
+  g_autofree char *new_remote = NULL;
+  g_autofree char *basename = NULL;
+  g_autoptr(GUri) uri = NULL;
+  g_auto(GStrv) remotes = NULL;
+  g_autoptr(GKeyFile) config = NULL;
+  g_autoptr(GBytes) gpg_key = NULL;
+  g_autofree char *group = NULL;
+  char *t;
+  int i;
+  gboolean res;
+
+  if (priv->disable_deps)
+    return TRUE;
+
+  g_assert (dep_keyfile != NULL);
+
+  uri = g_uri_parse (dep_url, FLATPAK_HTTP_URI_FLAGS | G_URI_FLAGS_PARSE_RELAXED, NULL);
+  basename = g_path_get_basename (g_uri_get_path (uri));
   /* Strip suffix */
   t = strchr (basename, '.');
   if (t != NULL)
@@ -4077,30 +4443,23 @@ handle_runtime_repo_deps (FlatpakTransaction *self,
 
 static gboolean
 handle_runtime_repo_deps_from_keyfile (FlatpakTransaction *self,
-                                       GKeyFile           *keyfile,
+                                       GKeyFile           *flatpakref_keyfile,
+                                       const char         *runtime_repo_url,
+                                       GKeyFile           *runtime_repo_keyfile,
                                        GCancellable       *cancellable,
                                        GError            **error)
 {
   FlatpakTransactionPrivate *priv = flatpak_transaction_get_instance_private (self);
-  g_autofree char *dep_url = NULL;
   g_autofree char *name = NULL;
 
   if (priv->disable_deps)
     return TRUE;
 
-  dep_url = g_key_file_get_string (keyfile, FLATPAK_REF_GROUP,
-                                   FLATPAK_REF_RUNTIME_REPO_KEY, NULL);
-  if (dep_url == NULL)
-    {
-      g_warning ("Flatpakref file does not contain a %s", FLATPAK_REF_RUNTIME_REPO_KEY);
-      return TRUE;
-    }
-
-  name = g_key_file_get_string (keyfile, FLATPAK_REF_GROUP, FLATPAK_REF_NAME_KEY, NULL);
+  name = g_key_file_get_string (flatpakref_keyfile, FLATPAK_REF_GROUP, FLATPAK_REF_NAME_KEY, NULL);
   if (name == NULL)
     return TRUE;
 
-  return handle_runtime_repo_deps (self, name, dep_url, cancellable, error);
+  return handle_runtime_repo_deps (self, name, runtime_repo_url, runtime_repo_keyfile, cancellable, error);
 }
 
 static gboolean
@@ -4115,13 +4474,30 @@ flatpak_transaction_resolve_flatpakrefs (FlatpakTransaction *self,
     {
       GKeyFile *flatpakref = l->data;
       g_autofree char *remote = NULL;
+      g_autofree char *runtime_repo_url = NULL;
       g_autoptr(FlatpakDecomposed) ref = NULL;
+      g_autoptr(GKeyFile) runtime_repo_keyfile = NULL;
 
-      /* Handle this before the runtime deps, because they might be the same */
-      if (!handle_suggested_remote_name (self, flatpakref, error))
+      if (!priv->disable_deps)
+        {
+          runtime_repo_url = g_key_file_get_string (flatpakref, FLATPAK_REF_GROUP,
+                                                    FLATPAK_REF_RUNTIME_REPO_KEY, NULL);
+          if (runtime_repo_url == NULL)
+            g_warning ("Flatpakref file does not contain a %s", FLATPAK_REF_RUNTIME_REPO_KEY);
+          else if (!load_flatpakrepo_file (self, runtime_repo_url, &runtime_repo_keyfile, cancellable, error))
+            return FALSE;
+        }
+
+      /* Handle SuggestRemoteName before the runtime deps, because they might
+       * be the same. Pass in the RuntimeRepo keyfile so its metadata can be
+       * used in that case. */
+      if (!handle_suggested_remote_name (self, flatpakref, runtime_repo_keyfile, error))
         return FALSE;
 
-      if (!handle_runtime_repo_deps_from_keyfile (self, flatpakref, cancellable, error))
+      if (runtime_repo_keyfile != NULL &&
+          !handle_runtime_repo_deps_from_keyfile (self, flatpakref,
+                                                  runtime_repo_url, runtime_repo_keyfile,
+                                                  cancellable, error))
         return FALSE;
 
       if (!flatpak_dir_create_remote_for_ref_file (priv->dir, flatpakref, priv->default_arch,
@@ -4151,6 +4527,7 @@ handle_runtime_repo_deps_from_bundle (FlatpakTransaction *self,
   g_autofree char *dep_url = NULL;
   g_autoptr(FlatpakDecomposed) ref = NULL;
   g_autoptr(GVariant) metadata = NULL;
+  g_autoptr(GKeyFile) runtime_repo_keyfile = NULL;
   g_autofree char *id = NULL;
 
   if (priv->disable_deps)
@@ -4172,7 +4549,10 @@ handle_runtime_repo_deps_from_bundle (FlatpakTransaction *self,
 
   id = flatpak_decomposed_dup_id (ref);
 
-  return handle_runtime_repo_deps (self, id, dep_url, cancellable, error);
+  if (!load_flatpakrepo_file (self, dep_url, &runtime_repo_keyfile, cancellable, error))
+    return FALSE;
+
+  return handle_runtime_repo_deps (self, id, dep_url, runtime_repo_keyfile, cancellable, error);
 }
 
 static gboolean
@@ -4209,7 +4589,7 @@ flatpak_transaction_resolve_bundles (FlatpakTransaction *self,
 
       if (!flatpak_transaction_add_ref (self, remote, ref, NULL, NULL, commit,
                                         FLATPAK_TRANSACTION_OPERATION_INSTALL_BUNDLE,
-                                        data->file, metadata, error))
+                                        data->file, metadata, FALSE, error))
         return FALSE;
     }
 
@@ -4251,6 +4631,7 @@ _run_op_kind (FlatpakTransaction           *self,
               FlatpakRemoteState           *remote_state, /* nullable */
               gboolean                     *out_needs_prune,
               gboolean                     *out_needs_triggers,
+              gboolean                     *out_needs_cache_drop,
               GCancellable                 *cancellable,
               GError                      **error)
 {
@@ -4279,6 +4660,7 @@ _run_op_kind (FlatpakTransaction           *self,
                                    priv->disable_static_deltas,
                                    priv->reinstall,
                                    priv->max_op >= APP_UPDATE,
+                                   op->pin_on_deploy,
                                    remote_state, op->ref,
                                    op->resolved_commit,
                                    (const char **) op->subpaths,
@@ -4316,6 +4698,9 @@ _run_op_kind (FlatpakTransaction           *self,
 
           if (flatpak_decomposed_is_app (op->ref))
             *out_needs_triggers = TRUE;
+
+          if (op->pin_on_deploy)
+            *out_needs_cache_drop = TRUE;
         }
     }
   else if (op->kind == FLATPAK_TRANSACTION_OPERATION_UPDATE)
@@ -4458,10 +4843,9 @@ flatpak_transaction_normalize_ops (FlatpakTransaction *self)
 
           if (dir_ref_is_installed (priv->dir, op->ref, NULL, &deploy_data))
             {
-              /* Don't use the remote from related ref on update, always use
-                 the current remote. */
-              g_free (op->remote);
-              op->remote = g_strdup (flatpak_deploy_data_get_origin (deploy_data));
+              /* The remote should have already been set to the installed ref
+               * origin so that the resolved commit definitely exists there */
+              g_assert (g_strcmp0 (op->remote, flatpak_deploy_data_get_origin (deploy_data)) == 0);
 
               op->kind = FLATPAK_TRANSACTION_OPERATION_UPDATE;
             }
@@ -4588,11 +4972,18 @@ add_uninstall_unused_ops (FlatpakTransaction  *self,
       origin = flatpak_dir_get_origin (priv->dir, unused_ref, NULL, NULL);
       if (origin)
         {
+          if (priv->no_deploy)
+            {
+              g_info ("Skipping uninstallation of %s for no deploy transaction",
+                      unused_ref_str);
+              continue;
+            }
+
           /* These get added last and have no dependencies, so will run last */
           uninstall_op = flatpak_transaction_add_op (self, origin, unused_ref,
                                                      NULL, NULL, NULL, NULL,
                                                      FLATPAK_TRANSACTION_OPERATION_UNINSTALL,
-                                                     NULL);
+                                                     FALSE, NULL);
           if (uninstall_op)
             run_operation_last (uninstall_op);
         }
@@ -4611,6 +5002,7 @@ flatpak_transaction_real_run (FlatpakTransaction *self,
   gboolean succeeded = TRUE;
   gboolean needs_prune = FALSE;
   gboolean needs_triggers = FALSE;
+  gboolean needs_cache_drop = FALSE;
   gboolean ready_res = FALSE;
   int i;
 
@@ -4770,7 +5162,9 @@ flatpak_transaction_real_run (FlatpakTransaction *self,
         }
 
       /* Here we execute the operation in a helper function */
-      if (res && !_run_op_kind (self, op, state, &needs_prune, &needs_triggers, cancellable, &local_error))
+      if (res && !_run_op_kind (self, op, state,
+                                &needs_prune, &needs_triggers, &needs_cache_drop,
+                                cancellable, &local_error))
         res = FALSE;
 
       if (res)
@@ -4829,15 +5223,9 @@ flatpak_transaction_real_run (FlatpakTransaction *self,
   for (i = 0; i < priv->added_origin_remotes->len; i++)
     flatpak_dir_prune_origin_remote (priv->dir, g_ptr_array_index (priv->added_origin_remotes, i));
 
-  for (i = 0; i < priv->added_pinned_runtimes->len; i++)
-    {
-      FlatpakDecomposed *pinned_runtime = g_ptr_array_index (priv->added_pinned_runtimes, i);
-      if (!dir_ref_is_installed (priv->dir, pinned_runtime, NULL, NULL))
-        {
-          flatpak_dir_config_remove_pattern (priv->dir, "pinned", flatpak_decomposed_get_ref (pinned_runtime), NULL);
-          flatpak_installation_drop_caches (priv->installation, NULL, NULL);
-        }
-    }
+  /* Reload config in case it changed via system helper */
+  if (needs_cache_drop || priv->added_origin_remotes->len > 0)
+    flatpak_installation_drop_caches (priv->installation, NULL, NULL);
 
   return succeeded;
 }

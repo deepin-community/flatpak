@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2015 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -32,7 +32,7 @@
  * @Title: FlatpakRelatedRef
  * @Short_description: Related application reference
  *
- * A FlatpakRelatedRef provides information about an ref that is related
+ * A FlatpakRelatedRef provides information about a ref that is related
  * to another ref. For instance, the local extension ref of an app.
  *
  * Since: 0.6.7

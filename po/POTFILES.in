@@ -50,6 +50,7 @@ app/flatpak-quiet-transaction.c
 common/flatpak-auth.c
 common/flatpak-context.c
 common/flatpak-dir.c
+common/flatpak-exports.c
 common/flatpak-installation.c
 common/flatpak-instance.c
 common/flatpak-oci-registry.c
@@ -58,6 +59,7 @@ common/flatpak-ref-utils.c
 common/flatpak-remote.c
 common/flatpak-run.c
 common/flatpak-transaction.c
+common/flatpak-uri.c
 common/flatpak-utils.c
 oci-authenticator/flatpak-oci-authenticator.c
 portal/flatpak-portal.c

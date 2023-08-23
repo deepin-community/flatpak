@@ -43,6 +43,7 @@ char * flatpak_make_valid_id_prefix (const char *orig_id);
 gboolean flatpak_id_has_subref_suffix (const char *id,
                                        gssize      id_len);
 
+gboolean flatpak_is_app_runtime_or_appstream_ref (const char *ref);
 char * flatpak_get_arch_for_ref (const char *ref);
 const char *flatpak_get_compat_arch_reverse (const char *compat_arch);
 
@@ -86,6 +87,8 @@ char *             flatpak_decomposed_dup_collection_id     (FlatpakDecomposed  
 gboolean           flatpak_decomposed_equal                 (FlatpakDecomposed  *ref_a,
                                                              FlatpakDecomposed  *ref_b);
 gboolean           flatpak_decomposed_equal_except_branch   (FlatpakDecomposed  *ref_a,
+                                                             FlatpakDecomposed  *ref_b);
+gboolean           flatpak_decomposed_equal_except_arch     (FlatpakDecomposed  *ref_a,
                                                              FlatpakDecomposed  *ref_b);
 gint               flatpak_decomposed_strcmp                (FlatpakDecomposed  *ref_a,
                                                              FlatpakDecomposed  *ref_b);

@@ -50,7 +50,6 @@ AM_CPPFLAGS =							\
 	-DSYSTEM_HELPER_USER=\"$(SYSTEM_HELPER_USER)\"          \
 	-DSYSTEM_FONT_CACHE_DIRS=\"$(SYSTEM_FONT_CACHE_DIRS)\"		\
 	-DG_LOG_DOMAIN=\"flatpak\"				\
-	-I$(srcdir)/subprojects					\
 	-I$(srcdir)/subprojects/libglnx				\
 	-I$(srcdir)/common					\
 	-I$(builddir)/common					\
@@ -85,12 +84,13 @@ dist_triggers_SCRIPTS = \
 	$(NULL)
 
 # This canonicalizes the PKG_CHECK_MODULES or AM_PATH_GPGME results
-INTERNAL_GPGME_CFLAGS = $(DEP_GPGME_CFLAGS) $(GPGME_PTHREAD_CFLAGS)
-INTERNAL_GPGME_LIBS = $(DEP_GPGME_LIBS) $(GPGME_PTHREAD_LIBS)
+INTERNAL_GPGME_CFLAGS = $(DEP_GPGME_CFLAGS) $(DEP_GPGME_PTHREAD_CFLAGS) $(GPGME_PTHREAD_CFLAGS)
+INTERNAL_GPGME_LIBS = $(DEP_GPGME_LIBS) $(DEP_GPGME_PTHREAD_LIBS) $(GPGME_PTHREAD_LIBS)
 
 lib_LTLIBRARIES =
 noinst_LTLIBRARIES += libglnx.la
 libglnx_srcpath := $(srcdir)/subprojects/libglnx
+# This intentionally does not include AM_CFLAGS, libglnx always uses those
 libglnx_cflags := \
 	$(BASE_CFLAGS) \
 	"-I$(libglnx_srcpath)" \
@@ -162,6 +162,10 @@ profiledir = $(PROFILE_DIR)
 profile_DATA = profile/flatpak.sh
 EXTRA_DIST += $(profile_DATA)
 
+fishconfdir = $(datadir)/fish/vendor_conf.d
+fishconf_DATA = profile/flatpak.fish
+EXTRA_DIST += $(fishconf_DATA)
+
 envdir = $(datadir)/gdm/env.d
 env_DATA =
 if INSTALL_GDM_ENV_FILE
@@ -206,7 +210,7 @@ AM_DISTCHECK_CONFIGURE_FLAGS =		\
 
 coverage:
 	$(AM_V_GEN) $(MAKE) $(AM_MAKEFLAGS) lcov-clean
-	$(AM_V_GEN) $(MAKE) check
+	$(AM_V_GEN) FLATPAK_TEST_COVERAGE=1 $(MAKE) check
 	$(AM_V_GEN) $(MAKE) $(AM_MAKEFLAGS) genlcov
 
 lcov-clean:

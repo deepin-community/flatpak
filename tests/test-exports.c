@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2020 Collabora Ltd.
  *
  * This program is free software; you can redistribute it and/or
@@ -536,6 +536,13 @@ static const NotFilesystem not_filesystems[] =
   { "xdg-run", G_OPTION_ERROR_FAILED },
   { "/", G_OPTION_ERROR_BAD_VALUE },
   { "/////././././././//////", G_OPTION_ERROR_BAD_VALUE },
+  { "host:reset", G_OPTION_ERROR_FAILED },
+  { "host-reset", G_OPTION_ERROR_FAILED },
+  { "host-reset:rw", G_OPTION_ERROR_FAILED },
+  { "host-reset:reset", G_OPTION_ERROR_FAILED },
+  { "!host-reset:reset", G_OPTION_ERROR_FAILED },
+  { "/foo:reset", G_OPTION_ERROR_FAILED },
+  { "!/foo:reset", G_OPTION_ERROR_FAILED },
 };
 
 typedef struct
@@ -591,6 +598,9 @@ static const Filesystem filesystems[] =
   { "~///././//", FLATPAK_FILESYSTEM_MODE_READ_WRITE, "home" },
   { "home/", FLATPAK_FILESYSTEM_MODE_READ_WRITE, "home" },
   { "home/Projects", FLATPAK_FILESYSTEM_MODE_READ_WRITE, "~/Projects" },
+  { "!home", FLATPAK_FILESYSTEM_MODE_NONE, "home" },
+  { "!host:reset", FLATPAK_FILESYSTEM_MODE_NONE, "host-reset" },
+  { "!host-reset", FLATPAK_FILESYSTEM_MODE_NONE, "host-reset" },
 };
 
 static void
@@ -601,19 +611,32 @@ test_filesystems (void)
   for (i = 0; i < G_N_ELEMENTS (filesystems); i++)
     {
       const Filesystem *fs = &filesystems[i];
+      const char *input = fs->input;
+      gboolean negated = FALSE;
       g_autoptr(GError) error = NULL;
       g_autofree char *normalized;
       FlatpakFilesystemMode mode;
       gboolean ret;
 
       g_test_message ("%s", fs->input);
-      ret = flatpak_context_parse_filesystem (fs->input, &normalized, &mode,
-                                              &error);
+
+      if (input[0] == '!')
+        {
+          g_test_message ("-> input is negated");
+          negated = TRUE;
+          input++;
+        }
+
+      ret = flatpak_context_parse_filesystem (input, negated,
+                                              &normalized, &mode, &error);
       g_assert_no_error (error);
       g_assert_true (ret);
 
+      g_test_message ("-> mode: %u", mode);
+      g_test_message ("-> normalized filesystem: %s", normalized);
+
       if (fs->fs == NULL)
-        g_assert_cmpstr (normalized, ==, fs->input);
+        g_assert_cmpstr (normalized, ==, input);
       else
         g_assert_cmpstr (normalized, ==, fs->fs);
 
@@ -623,14 +646,23 @@ test_filesystems (void)
   for (i = 0; i < G_N_ELEMENTS (not_filesystems); i++)
     {
       const NotFilesystem *not = &not_filesystems[i];
+      const char *input = not->input;
+      gboolean negated = FALSE;
       g_autoptr(GError) error = NULL;
       char *normalized = NULL;
       FlatpakFilesystemMode mode;
       gboolean ret;
 
       g_test_message ("%s", not->input);
-      ret = flatpak_context_parse_filesystem (not->input, &normalized, &mode,
-                                              &error);
+
+      if (input[0] == '!')
+        {
+          negated = TRUE;
+          input++;
+        }
+
+      ret = flatpak_context_parse_filesystem (input, negated,
+                                              &normalized, &mode, &error);
       g_test_message ("-> %s", error ? error->message : "(no error)");
       g_assert_error (error, G_OPTION_ERROR, not->code);
       g_assert_false (ret);
@@ -702,6 +734,7 @@ test_full (void)
   g_autofree gchar *create_dir = g_build_filename (subdir, "create-dir", NULL);
   g_autofree gchar *create_dir2 = g_build_filename (subdir, "create-dir2", NULL);
   gsize i;
+  gboolean ok;
 
   glnx_shutil_rm_rf_at (-1, subdir, NULL, &error);
 
@@ -757,30 +790,55 @@ test_full (void)
                                        FLATPAK_FILESYSTEM_MODE_READ_WRITE);
   flatpak_exports_add_host_os_expose (exports,
                                       FLATPAK_FILESYSTEM_MODE_READ_ONLY);
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_WRITE,
-                                   expose_rw);
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   expose_ro);
-  flatpak_exports_add_path_tmpfs (exports, hide_below_expose);
-  flatpak_exports_add_path_expose_or_hide (exports,
-                                           FLATPAK_FILESYSTEM_MODE_NONE,
-                                           hide);
-  flatpak_exports_add_path_expose_or_hide (exports,
-                                           FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                           dont_hide);
-  flatpak_exports_add_path_expose_or_hide (exports,
-                                           FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                           enoent);
-  flatpak_exports_add_path_expose_or_hide (exports,
-                                           FLATPAK_FILESYSTEM_MODE_READ_WRITE,
-                                           rel_link);
-  flatpak_exports_add_path_expose_or_hide (exports,
-                                           FLATPAK_FILESYSTEM_MODE_READ_WRITE,
-                                           abs_link);
-  flatpak_exports_add_path_dir (exports, create_dir);
-  flatpak_exports_add_path_dir (exports, create_dir2);
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                        expose_rw, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        expose_ro, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  ok = flatpak_exports_add_path_tmpfs (exports, hide_below_expose, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  ok = flatpak_exports_add_path_expose_or_hide (exports,
+                                                FLATPAK_FILESYSTEM_MODE_NONE,
+                                                hide, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  ok = flatpak_exports_add_path_expose_or_hide (exports,
+                                                FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                                dont_hide, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  ok = flatpak_exports_add_path_expose_or_hide (exports,
+                                                FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                                enoent, &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  ok = flatpak_exports_add_path_expose_or_hide (exports,
+                                                FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                                rel_link, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  ok = flatpak_exports_add_path_expose_or_hide (exports,
+                                                FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                                abs_link, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+  ok = flatpak_exports_add_path_dir (exports, create_dir, &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  ok = flatpak_exports_add_path_dir (exports, create_dir2, &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_assert_false (ok);
+  g_clear_error (&error);
 
   g_assert_cmpuint (flatpak_exports_path_get_mode (exports, expose_rw), ==,
                     FLATPAK_FILESYSTEM_MODE_READ_WRITE);
@@ -1201,6 +1259,39 @@ test_exports_debian_merged (void)
   g_assert_cmpuint (i, ==, bwrap->argv->len);
 }
 
+static const struct
+{
+  const char *tried;
+  const char *because;
+}
+reserved_filesystems[] =
+{
+  { "/", "/.flatpak-info" },
+  { "/.flatpak-info", "/.flatpak-info" },
+  { "/app", "/app" },
+  { "/app/foo", "/app" },
+  { "/bin", "/bin" },
+  { "/bin/sh", "/bin" },
+  { "/dev", "/dev" },
+  { "/etc", "/etc" },
+  { "/etc/passwd", "/etc" },
+  { "/lib", "/lib" },
+  { "/lib/ld-linux.so.2", "/lib" },
+  { "/lib64", "/lib64" },
+  { "/lib64/ld-linux-x86-64.so.2", "/lib64" },
+  { "/proc", "/proc" },
+  { "/proc/1", "/proc" },
+  { "/proc/sys/net", "/proc" },
+  { "/run", "/run/flatpak" },
+  { "/run/flatpak/foo/bar", "/run/flatpak" },
+  { "/run/host/foo", "/run/host" },
+  { "/sbin", "/sbin" },
+  { "/sbin/ldconfig", "/sbin" },
+  { "/usr", "/usr" },
+  { "/usr/bin/env", "/usr" },
+  { "/usr/foo/bar", "/usr" },
+};
+
 static void
 test_exports_ignored (void)
 {
@@ -1208,62 +1299,31 @@ test_exports_ignored (void)
   g_autoptr(FlatpakExports) exports = flatpak_exports_new ();
   gsize i;
 
-  /* These paths are chosen so that they probably exist, with the
-   * exception of /app */
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/app");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/etc");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/etc/passwd");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/usr");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/usr/bin/env");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/dev");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/dev/full");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/proc");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/proc/1");
+  for (i = 0; i < G_N_ELEMENTS (reserved_filesystems); i++)
+    {
+      const char *tried = reserved_filesystems[i].tried;
+      const char *because = reserved_filesystems[i].because;
+      g_autoptr(GError) error = NULL;
+      gboolean ok;
 
-  /* These probably exist, and are merged into /usr on systems with
-   * the /usr merge */
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/bin");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/bin/sh");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/lib");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/lib/ld-linux.so.2");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/lib64");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/lib64/ld-linux-x86-64.so.2");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/sbin");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/sbin/ldconfig");
+      ok = flatpak_exports_add_path_expose (exports,
+                                            FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                            tried,
+                                            &error);
+      g_assert_nonnull (error);
+      g_assert_nonnull (error->message);
+      g_test_message ("Trying to export %s -> %s", tried, error->message);
+      g_assert_false (ok);
+
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_MOUNTABLE_FILE))
+        {
+          g_autofree char *pattern = g_strdup_printf ("Path \"%s\" is reserved by Flatpak",
+                                                      because);
+
+          g_test_message ("Expecting to see pattern: %s", pattern);
+          g_assert_nonnull (strstr (error->message, pattern));
+        }
+    }
 
   flatpak_bwrap_add_arg (bwrap, "bwrap");
   flatpak_exports_append_bwrap_args (exports, bwrap);
@@ -1300,6 +1360,7 @@ test_exports_unusual (void)
     { "home", FAKE_SYMLINK, "var/home" },
     { "lib", FAKE_SYMLINK, "usr/lib" },
     { "recursion", FAKE_SYMLINK, "recursion" },
+    { "symlink-to-root", FAKE_SYMLINK, "." },
     { "tmp", FAKE_SYMLINK, "TMP" },
     { "usr/bin", FAKE_DIR },
     { "usr/lib", FAKE_DIR },
@@ -1312,35 +1373,79 @@ test_exports_unusual (void)
   g_autoptr(FlatpakBwrap) bwrap = flatpak_bwrap_new (NULL);
   g_autoptr(FlatpakExports) exports = NULL;
   gsize i;
+  g_autoptr(GError) error = NULL;
+  gboolean ok;
 
   exports = test_host_exports_setup (files,
                                      FLATPAK_FILESYSTEM_MODE_NONE,
                                      FLATPAK_FILESYSTEM_MODE_READ_ONLY);
   flatpak_exports_set_test_flags (exports, FLATPAK_EXPORTS_TEST_FLAGS_AUTOFS);
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/broken-autofs");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/dangling-link");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/home/me");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/nonexistent");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/recursion");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "/tmp");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_WRITE,
-                                   "/var/tmp");
-  flatpak_exports_add_path_expose (exports,
-                                   FLATPAK_FILESYSTEM_MODE_READ_ONLY,
-                                   "not-absolute");
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "/broken-autofs", &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK);
+  g_test_message ("attempting to export /broken-autofs: %s", error->message);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "/dangling-link", &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_test_message ("attempting to export /dangling-link: %s", error->message);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "/home/me", &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "/nonexistent", &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+  g_test_message ("attempting to export /nonexistent: %s", error->message);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "/recursion", &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_TOO_MANY_LINKS);
+  g_test_message ("attempting to export /recursion: %s", error->message);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "/symlink-to-root", &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_MOUNTABLE_FILE);
+  g_test_message ("attempting to export /symlink-to-root: %s", error->message);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "/tmp", &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                        "/var/tmp", &error);
+  g_assert_no_error (error);
+  g_assert_true (ok);
+
+  ok = flatpak_exports_add_path_expose (exports,
+                                        FLATPAK_FILESYSTEM_MODE_READ_ONLY,
+                                        "not-absolute", &error);
+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_FILENAME);
+  g_test_message ("attempting to export not-absolute: %s", error->message);
+  g_assert_false (ok);
+  g_clear_error (&error);
+
   test_host_exports_finish (exports, bwrap);
 
   i = 0;
@@ -1368,6 +1473,9 @@ int
 main (int argc, char *argv[])
 {
   int res;
+
+  /* Do not call setlocale() here: some tests look at untranslated error
+   * messages. */
 
   isolated_test_dir_global_setup ();
 

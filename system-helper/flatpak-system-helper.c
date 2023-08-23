@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2014 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -399,6 +399,7 @@ handle_deploy (FlatpakSystemHelper   *object,
   gboolean no_deploy;
   gboolean local_pull;
   gboolean reinstall;
+  gboolean update_pinned;
   g_autofree char *url = NULL;
   g_autoptr(OngoingPull) ongoing_pull = NULL;
   g_autofree gchar *src_dir = NULL;
@@ -483,6 +484,7 @@ handle_deploy (FlatpakSystemHelper   *object,
   no_deploy = (arg_flags & FLATPAK_HELPER_DEPLOY_FLAGS_NO_DEPLOY) != 0;
   local_pull = (arg_flags & FLATPAK_HELPER_DEPLOY_FLAGS_LOCAL_PULL) != 0;
   reinstall = (arg_flags & FLATPAK_HELPER_DEPLOY_FLAGS_REINSTALL) != 0;
+  update_pinned = (arg_flags & FLATPAK_HELPER_DEPLOY_FLAGS_UPDATE_PINNED) != 0;
 
   deploy_dir = flatpak_dir_get_if_deployed (system, ref, NULL, NULL);
 
@@ -699,7 +701,7 @@ handle_deploy (FlatpakSystemHelper   *object,
           if (!flatpak_dir_deploy_install (system, ref, arg_origin,
                                            (const char **) arg_subpaths,
                                            (const char **) arg_previous_ids,
-                                           reinstall, NULL, &error))
+                                           reinstall, update_pinned, NULL, &error))
             {
               flatpak_invocation_return_error (invocation, error, "Error deploying");
               return G_DBUS_METHOD_INVOCATION_HANDLED;
@@ -2287,7 +2289,7 @@ message_handler (const gchar   *log_domain,
                  gpointer       user_data)
 {
   /* Make this look like normal console output */
-  if (log_level & G_LOG_LEVEL_DEBUG)
+  if (log_level & (G_LOG_LEVEL_DEBUG | G_LOG_LEVEL_INFO))
     g_printerr ("FH: %s\n", message);
   else
     g_printerr ("%s: %s\n", g_get_prgname (), message);
@@ -2371,12 +2373,12 @@ main (int    argc,
   flatpak_disable_fancy_output ();
 
   if (opt_verbose > 0)
-    g_log_set_handler (G_LOG_DOMAIN, G_LOG_LEVEL_DEBUG, message_handler, NULL);
+    g_log_set_handler (G_LOG_DOMAIN, G_LOG_LEVEL_DEBUG | G_LOG_LEVEL_INFO, message_handler, NULL);
   if (opt_verbose > 1)
-    g_log_set_handler (G_LOG_DOMAIN "2", G_LOG_LEVEL_DEBUG, message_handler, NULL);
+    g_log_set_handler (G_LOG_DOMAIN "2", G_LOG_LEVEL_DEBUG | G_LOG_LEVEL_INFO, message_handler, NULL);
 
   if (opt_ostree_verbose)
-    g_log_set_handler ("OSTree", G_LOG_LEVEL_DEBUG, message_handler, NULL);
+    g_log_set_handler ("OSTree", G_LOG_LEVEL_DEBUG | G_LOG_LEVEL_INFO, message_handler, NULL);
 
   if (!on_session_bus)
     {

@@ -2085,13 +2085,16 @@ flatpak_installation_list_installed_related_refs_sync
                                 <em class="parameter"><code>const <span class="type">char</span> *ref</code></em>,
                                 <em class="parameter"><code><a href="https://developer.gnome.org/gio/unstable/GCancellable.html#GCancellable-struct"><span class="type">GCancellable</span></a> *cancellable</code></em>,
                                 <em class="parameter"><code><a href="https://developer.gnome.org/glib/unstable/glib-Error-Reporting.html#GError"><span class="type">GError</span></a> **error</code></em>);</pre>
-<p>Lists all the locally installed refs from <em class="parameter"><code>remote_name</code></em>
- that are
-related to <em class="parameter"><code>ref</code></em>
-. These are things that are interesting to install,
-update, or uninstall together with <em class="parameter"><code>ref</code></em>
-. For instance, locale data
-or debug information.</p>
+<p>Lists all the locally installed refs that are related to <em class="parameter"><code>ref</code></em>
+. These are
+things that are interesting to install, update, or uninstall together with
+<em class="parameter"><code>ref</code></em>
+. For instance, locale data or debug information.</p>
+<p>Note that while the related refs are usually installed from the same remote
+as <em class="parameter"><code>ref</code></em>
+ (<em class="parameter"><code>remote_name</code></em>
+), it is possible they were installed from another
+remote.</p>
 <p>This function is similar to flatpak_installation_list_remote_related_refs_sync,
 but instead of looking at what is available on the remote, it only looks
 at the locally installed refs. This is useful for instance when you're
@@ -2113,7 +2116,8 @@ FLATPAK_UPDATE_FLAGS_NO_PULL to install previously pulled refs.</p>
 </tr>
 <tr>
 <td class="parameter_name"><p>remote_name</p></td>
-<td class="parameter_description"><p>the name of the remote</p></td>
+<td class="parameter_description"><p>the name of the remote providing <em class="parameter"><code>ref</code></em>
+</p></td>
 <td class="parameter_annotations"> </td>
 </tr>
 <tr>

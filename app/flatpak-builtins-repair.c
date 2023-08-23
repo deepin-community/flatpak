@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2018 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -27,7 +27,7 @@
 
 #include <glib/gi18n.h>
 
-#include "libglnx/libglnx.h"
+#include "libglnx.h"
 
 #include "flatpak-builtins.h"
 #include "flatpak-builtins-utils.h"
@@ -221,7 +221,17 @@ fsck_commit (OstreeRepo *repo,
 
   if (!ostree_repo_load_commit (repo, checksum, &commit, &commitstate, &local_error))
     {
-      g_print ("%s\n", local_error->message);
+      /* This really shouldn't happen since we just fsck'd the commit, but
+       * deleting it makes the most sense.
+       */
+      if (opt_dry_run)
+        g_printerr (_("Commit invalid %s: %s\n"), checksum, local_error->message);
+      else
+        {
+          g_printerr (_("Deleting invalid commit %s: %s\n"), checksum, local_error->message);
+          (void) ostree_repo_delete_object (repo, OSTREE_OBJECT_TYPE_COMMIT, checksum, NULL, NULL);
+        }
+
       g_clear_error (&local_error);
       return FSCK_STATUS_HAS_INVALID_OBJECTS;
     }
@@ -240,9 +250,27 @@ fsck_commit (OstreeRepo *repo,
   dirtree_status = fsck_dirtree (repo, partial, dirtree_checksum, object_status_cache);
   status = MAX (status, dirtree_status);
 
-  /* Its ok for partial commits to have missing objects */
+  /* It's ok for partial commits to have missing objects
+   * https://github.com/flatpak/flatpak/issues/4624
+   */
   if (status == FSCK_STATUS_HAS_MISSING_OBJECTS && partial)
     status = FSCK_STATUS_OK;
+  else if (status != FSCK_STATUS_OK && !partial)
+    {
+      if (opt_dry_run)
+        g_printerr (_("Commit should be marked partial: %s\n"), checksum);
+      else
+        {
+          g_printerr (_("Marking commit as partial: %s\n"), checksum);
+          if (!ostree_repo_mark_commit_partial_reason (repo, checksum, TRUE,
+                                                       OSTREE_REPO_COMMIT_STATE_FSCK_PARTIAL,
+                                                       &local_error))
+            {
+              g_printerr ("%s\n", local_error->message);
+              g_clear_error (&local_error);
+            }
+        }
+    }
 
   return status;
 }
@@ -387,7 +415,7 @@ flatpak_builtin_repair (int argc, char **argv, GCancellable *cancellable, GError
 
        This does also mean that other areas of this code section that print errors will need to print a trailing
        newline as well, otherwise the output will overwrite any errors. */
-    if (flatpak_fancy_output ())
+    if (flatpak_fancy_output () && i != 1)
       g_print ("\033[A\r\033[K");
 
     g_print (_("[%d/%d] Verifying %s…\n"), i, g_hash_table_size (all_refs), refspec);

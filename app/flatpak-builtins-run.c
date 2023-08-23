@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2014 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -29,7 +29,7 @@
 
 #include <glib/gi18n.h>
 
-#include "libglnx/libglnx.h"
+#include "libglnx.h"
 
 #include "flatpak-builtins.h"
 #include "flatpak-utils-private.h"
@@ -278,7 +278,7 @@ flatpak_builtin_run (int argc, char **argv, GCancellable *cancellable, GError **
   if (opt_a11y_bus == -1)
     opt_a11y_bus = !opt_sandbox;
   if (opt_session_bus == -1)
-    opt_a11y_bus = !opt_sandbox;
+    opt_session_bus = !opt_sandbox;
 
   if (opt_sandbox)
     flags |= FLATPAK_RUN_FLAG_SANDBOX | FLATPAK_RUN_FLAG_NO_SYSTEM_BUS_PROXY;
