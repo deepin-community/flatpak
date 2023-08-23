@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2014-2018 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -35,10 +35,9 @@
 #include <glib/gi18n-lib.h>
 
 #include <gio/gio.h>
-#include "libglnx/libglnx.h"
+#include "libglnx.h"
 
 #include "flatpak-run-private.h"
-#include "flatpak-proxy.h"
 #include "flatpak-utils-private.h"
 #include "flatpak-dir-private.h"
 #include "flatpak-systemd-dbus-generated.h"
@@ -62,6 +61,7 @@ const char *flatpak_context_sockets[] = {
   "ssh-auth",
   "pcsc",
   "cups",
+  "gpg-agent",
   NULL
 };
 
@@ -87,6 +87,7 @@ const char *flatpak_context_special_filesystems[] = {
   "host",
   "host-etc",
   "host-os",
+  "host-reset",
   NULL
 };
 
@@ -487,11 +488,17 @@ flatpak_context_apply_generic_policy (FlatpakContext *context,
                        g_ptr_array_free (new, FALSE));
 }
 
-static void
+
+static gboolean
 flatpak_context_set_persistent (FlatpakContext *context,
-                                const char     *path)
+                                const char     *path,
+                                GError        **error)
 {
+  if (!flatpak_validate_path_characters (path, error))
+    return FALSE;
+
   g_hash_table_insert (context->persistent, g_strdup (path), GINT_TO_POINTER (1));
+  return TRUE;
 }
 
 static gboolean
@@ -704,6 +711,12 @@ unparse_filesystem_flags (const char           *path,
 
     case FLATPAK_FILESYSTEM_MODE_NONE:
       g_string_insert_c (s, 0, '!');
+
+      if (g_str_has_suffix (s->str, "-reset"))
+        {
+          g_string_truncate (s, s->len - 6);
+          g_string_append (s, ":reset");
+        }
       break;
 
     default:
@@ -716,11 +729,14 @@ unparse_filesystem_flags (const char           *path,
 
 static char *
 parse_filesystem_flags (const char            *filesystem,
-                        FlatpakFilesystemMode *mode_out)
+                        gboolean               negated,
+                        FlatpakFilesystemMode *mode_out,
+                        GError               **error)
 {
   g_autoptr(GString) s = g_string_new ("");
   const char *p, *suffix;
   FlatpakFilesystemMode mode;
+  gboolean reset = FALSE;
 
   p = filesystem;
   while (*p != 0 && *p != ':')
@@ -735,7 +751,31 @@ parse_filesystem_flags (const char            *filesystem,
         g_string_append_c (s, *p++);
     }
 
-  mode = FLATPAK_FILESYSTEM_MODE_READ_WRITE;
+  if (negated)
+    mode = FLATPAK_FILESYSTEM_MODE_NONE;
+  else
+    mode = FLATPAK_FILESYSTEM_MODE_READ_WRITE;
+
+  if (g_str_equal (s->str, "host-reset"))
+    {
+      reset = TRUE;
+
+      if (!negated)
+        {
+          g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                       "Filesystem token \"%s\" is only applicable for --nofilesystem",
+                       s->str);
+          return NULL;
+        }
+
+      if (*p != '\0')
+        {
+          g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                       "Filesystem token \"%s\" cannot be used with a suffix",
+                       s->str);
+          return NULL;
+        }
+    }
 
   if (*p == ':')
     {
@@ -747,9 +787,62 @@ parse_filesystem_flags (const char            *filesystem,
         mode = FLATPAK_FILESYSTEM_MODE_READ_WRITE;
       else if (strcmp (suffix, "create") == 0)
         mode = FLATPAK_FILESYSTEM_MODE_CREATE;
+      else if (strcmp (suffix, "reset") == 0)
+        reset = TRUE;
       else if (*suffix != 0)
         g_warning ("Unexpected filesystem suffix %s, ignoring", suffix);
+
+      if (negated && mode != FLATPAK_FILESYSTEM_MODE_NONE)
+        {
+          g_warning ("Filesystem suffix \"%s\" is not applicable for --nofilesystem",
+                     suffix);
+          mode = FLATPAK_FILESYSTEM_MODE_NONE;
+        }
+
+      if (reset)
+        {
+          if (!negated)
+            {
+              g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                           "Filesystem suffix \"%s\" only applies to --nofilesystem",
+                           suffix);
+              return NULL;
+            }
+
+          if (!g_str_equal (s->str, "host"))
+            {
+              g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+                           "Filesystem suffix \"%s\" can only be applied to "
+                           "--nofilesystem=host",
+                           suffix);
+              return NULL;
+            }
+
+          /* We internally handle host:reset (etc) as host-reset, only exposing it as a flag in the public
+             part to allow it to be ignored (with a warning) for old flatpak versions */
+          g_string_append (s, "-reset");
+        }
     }
+
+  /* Postcondition check: the code above should make some results
+   * impossible */
+  if (negated)
+    {
+      g_assert (mode == FLATPAK_FILESYSTEM_MODE_NONE);
+    }
+  else
+    {
+      g_assert (mode > FLATPAK_FILESYSTEM_MODE_NONE);
+      /* This flag is only applicable to --nofilesystem */
+      g_assert (!reset);
+    }
+
+  /* Postcondition check: filesystem token is host-reset iff reset flag
+   * was found */
+  if (reset)
+    g_assert (g_str_equal (s->str, "host-reset"));
+  else
+    g_assert (!g_str_equal (s->str, "host-reset"));
 
   if (mode_out)
     *mode_out = mode;
@@ -759,12 +852,20 @@ parse_filesystem_flags (const char            *filesystem,
 
 gboolean
 flatpak_context_parse_filesystem (const char             *filesystem_and_mode,
+                                  gboolean                negated,
                                   char                  **filesystem_out,
                                   FlatpakFilesystemMode  *mode_out,
                                   GError                **error)
 {
-  g_autofree char *filesystem = parse_filesystem_flags (filesystem_and_mode, mode_out);
+  g_autofree char *filesystem = NULL;
   char *slash;
+
+  if (!flatpak_validate_path_characters (filesystem_and_mode, error))
+    return FALSE;
+
+  filesystem = parse_filesystem_flags (filesystem_and_mode, negated, mode_out, error);
+  if (filesystem == NULL)
+    return FALSE;
 
   slash = strchr (filesystem, '/');
 
@@ -857,6 +958,14 @@ flatpak_context_take_filesystem (FlatpakContext        *context,
                                  char                  *fs,
                                  FlatpakFilesystemMode  mode)
 {
+  /* Special case: --nofilesystem=host-reset implies --nofilesystem=host.
+   * --filesystem=host-reset (or host:reset) is not allowed. */
+  if (g_str_equal (fs, "host-reset"))
+    {
+      g_return_if_fail (mode == FLATPAK_FILESYSTEM_MODE_NONE);
+      g_hash_table_insert (context->filesystems, g_strdup ("host"), GINT_TO_POINTER (mode));
+    }
+
   g_hash_table_insert (context->filesystems, fs, GINT_TO_POINTER (mode));
 }
 
@@ -888,6 +997,14 @@ flatpak_context_merge (FlatpakContext *context,
   while (g_hash_table_iter_next (&iter, &key, &value))
     g_hash_table_insert (context->persistent, g_strdup (key), value);
 
+  /* We first handle host:reset, as it overrides all other keys from the parent */
+  if (g_hash_table_lookup_extended (other->filesystems, "host-reset", NULL, &value))
+    {
+      g_warn_if_fail (GPOINTER_TO_INT (value) == FLATPAK_FILESYSTEM_MODE_NONE);
+      g_hash_table_remove_all (context->filesystems);
+    }
+
+  /* Then set the new ones, which includes propagating host:reset. */
   g_hash_table_iter_init (&iter, other->filesystems);
   while (g_hash_table_iter_next (&iter, &key, &value))
     g_hash_table_insert (context->filesystems, g_strdup (key), value);
@@ -1075,7 +1192,7 @@ option_filesystem_cb (const gchar *option_name,
   g_autofree char *fs = NULL;
   FlatpakFilesystemMode mode;
 
-  if (!flatpak_context_parse_filesystem (value, &fs, &mode, error))
+  if (!flatpak_context_parse_filesystem (value, FALSE, &fs, &mode, error))
     return FALSE;
 
   flatpak_context_take_filesystem (context, g_steal_pointer (&fs), mode);
@@ -1092,7 +1209,7 @@ option_nofilesystem_cb (const gchar *option_name,
   g_autofree char *fs = NULL;
   FlatpakFilesystemMode mode;
 
-  if (!flatpak_context_parse_filesystem (value, &fs, &mode, error))
+  if (!flatpak_context_parse_filesystem (value, TRUE, &fs, &mode, error))
     return FALSE;
 
   flatpak_context_take_filesystem (context, g_steal_pointer (&fs),
@@ -1402,8 +1519,7 @@ option_persist_cb (const gchar *option_name,
 {
   FlatpakContext *context = data;
 
-  flatpak_context_set_persistent (context, value);
-  return TRUE;
+  return flatpak_context_set_persistent (context, value, error);
 }
 
 static gboolean option_no_desktop_deprecated;
@@ -1595,17 +1711,28 @@ flatpak_context_load_metadata (FlatpakContext *context,
         {
           const char *fs = parse_negated (filesystems[i], &remove);
           g_autofree char *filesystem = NULL;
+          g_autoptr(GError) local_error = NULL;
           FlatpakFilesystemMode mode;
 
-          if (!flatpak_context_parse_filesystem (fs, &filesystem, &mode, NULL))
-            g_debug ("Unknown filesystem type %s", filesystems[i]);
+          if (!flatpak_context_parse_filesystem (fs, remove,
+                                                 &filesystem, &mode, &local_error))
+            {
+              if (g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA))
+                {
+                  /* Invalid characters, so just hard-fail. */
+                  g_propagate_error (error, g_steal_pointer (&local_error));
+                  return FALSE;
+                }
+              else
+                {
+                  g_debug ("Unknown filesystem type %s", filesystems[i]);
+                  g_clear_error (&local_error);
+                }
+            }
           else
             {
-              if (remove)
-                flatpak_context_take_filesystem (context, g_steal_pointer (&filesystem),
-                                                 FLATPAK_FILESYSTEM_MODE_NONE);
-              else
-                flatpak_context_take_filesystem (context, g_steal_pointer (&filesystem), mode);
+              g_assert (mode == FLATPAK_FILESYSTEM_MODE_NONE || !remove);
+              flatpak_context_take_filesystem (context, g_steal_pointer (&filesystem), mode);
             }
         }
     }
@@ -1618,7 +1745,8 @@ flatpak_context_load_metadata (FlatpakContext *context,
         return FALSE;
 
       for (i = 0; persistent[i] != NULL; i++)
-        flatpak_context_set_persistent (context, persistent[i]);
+        if (!flatpak_context_set_persistent (context, persistent[i], error))
+          return FALSE;
     }
 
   if (g_key_file_has_group (metakey, FLATPAK_METADATA_GROUP_SESSION_BUS_POLICY))
@@ -1851,10 +1979,27 @@ flatpak_context_save_metadata (FlatpakContext *context,
     {
       g_autoptr(GPtrArray) array = g_ptr_array_new_with_free_func (g_free);
 
+      /* Serialize host-reset first, because order can matter in
+       * corner cases. */
+      if (g_hash_table_lookup_extended (context->filesystems, "host-reset",
+                                        NULL, &value))
+        {
+          g_warn_if_fail (GPOINTER_TO_INT (value) == FLATPAK_FILESYSTEM_MODE_NONE);
+          if (!flatten)
+            g_ptr_array_add (array, g_strdup ("!host:reset"));
+        }
+
       g_hash_table_iter_init (&iter, context->filesystems);
       while (g_hash_table_iter_next (&iter, &key, &value))
         {
           FlatpakFilesystemMode mode = GPOINTER_TO_INT (value);
+
+          if (flatten && mode == FLATPAK_FILESYSTEM_MODE_NONE)
+            continue;
+
+          /* We already did this */
+          if (g_str_equal (key, "host-reset"))
+            continue;
 
           g_ptr_array_add (array, unparse_filesystem_flags (key, mode));
         }
@@ -1994,7 +2139,8 @@ flatpak_context_save_metadata (FlatpakContext *context,
 void
 flatpak_context_allow_host_fs (FlatpakContext *context)
 {
-  flatpak_context_take_filesystem (context, g_strdup ("host"), FLATPAK_FILESYSTEM_MODE_READ_WRITE);
+  flatpak_context_take_filesystem (context, g_strdup ("host"),
+                                   FLATPAK_FILESYSTEM_MODE_READ_WRITE);
 }
 
 gboolean
@@ -2185,18 +2331,36 @@ flatpak_context_to_args (FlatpakContext *context,
       g_ptr_array_add (args, g_strdup_printf ("--system-%s-name=%s", flatpak_policy_to_string (policy), name));
     }
 
+  /* Serialize host-reset first, because order can matter in
+   * corner cases. */
+  if (g_hash_table_lookup_extended (context->filesystems, "host-reset",
+                                    NULL, &value))
+    {
+      g_warn_if_fail (GPOINTER_TO_INT (value) == FLATPAK_FILESYSTEM_MODE_NONE);
+      g_ptr_array_add (args, g_strdup ("--nofilesystem=host:reset"));
+    }
+
   g_hash_table_iter_init (&iter, context->filesystems);
   while (g_hash_table_iter_next (&iter, &key, &value))
     {
+      g_autofree char *fs = NULL;
       FlatpakFilesystemMode mode = GPOINTER_TO_INT (value);
+
+      /* We already did this */
+      if (g_str_equal (key, "host-reset"))
+        continue;
+
+      fs = unparse_filesystem_flags (key, mode);
 
       if (mode != FLATPAK_FILESYSTEM_MODE_NONE)
         {
-          g_autofree char *fs = unparse_filesystem_flags (key, mode);
           g_ptr_array_add (args, g_strdup_printf ("--filesystem=%s", fs));
         }
       else
-        g_ptr_array_add (args, g_strdup_printf ("--nofilesystem=%s", (char *) key));
+        {
+          g_assert (fs[0] == '!');
+          g_ptr_array_add (args, g_strdup_printf ("--nofilesystem=%s", &fs[1]));
+        }
     }
 }
 
@@ -2220,7 +2384,10 @@ flatpak_context_add_bus_filters (FlatpakContext *context,
           flatpak_bwrap_add_arg_printf (bwrap, "--own=org.mpris.MediaPlayer2.%s.*", app_id);
         }
       else
-        flatpak_bwrap_add_arg_printf (bwrap, "--own=%s.Sandboxed.*", app_id);
+        {
+          flatpak_bwrap_add_arg_printf (bwrap, "--own=%s.Sandboxed.*", app_id);
+          flatpak_bwrap_add_arg_printf (bwrap, "--own=org.mpris.MediaPlayer2.%s.Sandboxed.*", app_id);
+        }
     }
 
   if (session_bus)
@@ -2290,9 +2457,64 @@ flatpak_context_make_sandboxed (FlatpakContext *context)
 }
 
 const char *dont_mount_in_root[] = {
-  ".", "..", "lib", "lib32", "lib64", "bin", "sbin", "usr", "boot", "root",
-  "tmp", "etc", "app", "run", "proc", "sys", "dev", "var", NULL
+  ".",
+  "..",
+  "app",
+  "bin",
+  "boot",
+  "dev",
+  "efi",
+  "etc",
+  "lib",
+  "lib32",
+  "lib64",
+  "proc",
+  "root",
+  "run",
+  "sbin",
+  "sys",
+  "tmp",
+  "usr",
+  "var",
+  NULL
 };
+
+static void
+log_cannot_export_error (FlatpakFilesystemMode  mode,
+                         const char            *path,
+                         const GError          *error)
+{
+  GLogLevelFlags level = G_LOG_LEVEL_MESSAGE;
+
+  /* By default we don't show a log message if the reason we are not sharing
+   * something with the sandbox is simply "it doesn't exist" (or something
+   * very close): otherwise it would be very noisy to launch apps that
+   * opportunistically share things they might benefit from, like Steam
+   * having access to $XDG_RUNTIME_DIR/app/com.discordapp.Discord if it
+   * happens to exist. */
+  if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND))
+    level = G_LOG_LEVEL_INFO;
+  /* Some callers specifically suppress warnings for particular errors
+   * by setting this code. */
+  else if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_FAILED_HANDLED))
+    level = G_LOG_LEVEL_INFO;
+
+  switch (mode)
+    {
+      case FLATPAK_FILESYSTEM_MODE_NONE:
+        g_log (G_LOG_DOMAIN, level, _("Not replacing \"%s\" with tmpfs: %s"),
+               path, error->message);
+        break;
+
+      case FLATPAK_FILESYSTEM_MODE_CREATE:
+      case FLATPAK_FILESYSTEM_MODE_READ_ONLY:
+      case FLATPAK_FILESYSTEM_MODE_READ_WRITE:
+        g_log (G_LOG_DOMAIN, level,
+               _("Not sharing \"%s\" with sandbox: %s"),
+               path, error->message);
+        break;
+    }
+}
 
 static void
 flatpak_context_export (FlatpakContext *context,
@@ -2308,6 +2530,7 @@ flatpak_context_export (FlatpakContext *context,
   FlatpakFilesystemMode fs_mode, os_mode, etc_mode, home_mode;
   GHashTableIter iter;
   gpointer key, value;
+  g_autoptr(GError) local_error = NULL;
 
   if (xdg_dirs_conf_out != NULL)
     xdg_dirs_conf = g_string_new ("");
@@ -2333,11 +2556,30 @@ flatpak_context_export (FlatpakContext *context,
                 continue;
 
               path = g_build_filename ("/", dirent->d_name, NULL);
-              flatpak_exports_add_path_expose (exports, fs_mode, path);
+
+              if (!flatpak_exports_add_path_expose (exports, fs_mode, path, &local_error))
+                {
+                  /* Failure to share something like /lib32 because it's
+                   * actually a symlink to /usr/lib32 is less of a problem
+                   * here than it would be for an explicit
+                   * --filesystem=/lib32, so the warning that would normally
+                   * be produced in that situation is downgraded to a
+                   * debug message. */
+                  if (g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_NOT_MOUNTABLE_FILE))
+                    local_error->code = G_IO_ERROR_FAILED_HANDLED;
+
+                  log_cannot_export_error (fs_mode, path, local_error);
+                  g_clear_error (&local_error);
+                }
             }
           closedir (dir);
         }
-      flatpak_exports_add_path_expose (exports, fs_mode, "/run/media");
+
+      if (!flatpak_exports_add_path_expose (exports, fs_mode, "/run/media", &local_error))
+        {
+          log_cannot_export_error (fs_mode, "/run/media", local_error);
+          g_clear_error (&local_error);
+        }
     }
 
   os_mode = MAX (GPOINTER_TO_INT (g_hash_table_lookup (context->filesystems, "host-os")),
@@ -2358,7 +2600,16 @@ flatpak_context_export (FlatpakContext *context,
       g_debug ("Allowing homedir access");
       home_access = TRUE;
 
-      flatpak_exports_add_path_expose (exports, MAX (home_mode, fs_mode), g_get_home_dir ());
+      if (!flatpak_exports_add_path_expose (exports, MAX (home_mode, fs_mode), g_get_home_dir (), &local_error))
+        {
+          /* Even if the error is one that we would normally silence, like
+           * the path not existing, it seems reasonable to make more of a fuss
+           * about the home directory not existing or otherwise being unusable,
+           * so this is intentionally not using cannot_export() */
+          g_warning (_("Not allowing home directory access: %s"),
+                     local_error->message);
+          g_clear_error (&local_error);
+        }
     }
 
   g_hash_table_iter_init (&iter, context->filesystems);
@@ -2397,7 +2648,10 @@ flatpak_context_export (FlatpakContext *context,
           subpath = g_build_filename (path, rest, NULL);
 
           if (mode == FLATPAK_FILESYSTEM_MODE_CREATE && do_create)
-            g_mkdir_with_parents (subpath, 0755);
+            {
+              if (g_mkdir_with_parents (subpath, 0755) != 0)
+                g_debug ("Unable to create directory %s", subpath);
+            }
 
           if (g_file_test (subpath, G_FILE_TEST_EXISTS))
             {
@@ -2405,7 +2659,11 @@ flatpak_context_export (FlatpakContext *context,
                 g_string_append_printf (xdg_dirs_conf, "%s=\"%s\"\n",
                                         config_key, path);
 
-              flatpak_exports_add_path_expose_or_hide (exports, mode, subpath);
+              if (!flatpak_exports_add_path_expose_or_hide (exports, mode, subpath, &local_error))
+                {
+                  log_cannot_export_error (mode, subpath, local_error);
+                  g_clear_error (&local_error);
+                }
             }
         }
       else if (g_str_has_prefix (filesystem, "~/"))
@@ -2415,18 +2673,30 @@ flatpak_context_export (FlatpakContext *context,
           path = g_build_filename (g_get_home_dir (), filesystem + 2, NULL);
 
           if (mode == FLATPAK_FILESYSTEM_MODE_CREATE && do_create)
-            g_mkdir_with_parents (path, 0755);
+            {
+              if (g_mkdir_with_parents (path, 0755) != 0)
+                g_debug ("Unable to create directory %s", path);
+            }
 
-          if (g_file_test (path, G_FILE_TEST_EXISTS))
-            flatpak_exports_add_path_expose_or_hide (exports, mode, path);
+          if (!flatpak_exports_add_path_expose_or_hide (exports, mode, path, &local_error))
+            {
+              log_cannot_export_error (mode, path, local_error);
+              g_clear_error (&local_error);
+            }
         }
       else if (g_str_has_prefix (filesystem, "/"))
         {
           if (mode == FLATPAK_FILESYSTEM_MODE_CREATE && do_create)
-            g_mkdir_with_parents (filesystem, 0755);
+            {
+              if (g_mkdir_with_parents (filesystem, 0755) != 0)
+                g_debug ("Unable to create directory %s", filesystem);
+            }
 
-          if (g_file_test (filesystem, G_FILE_TEST_EXISTS))
-            flatpak_exports_add_path_expose_or_hide (exports, mode, filesystem);
+          if (!flatpak_exports_add_path_expose_or_hide (exports, mode, filesystem, &local_error))
+            {
+              log_cannot_export_error (mode, filesystem, local_error);
+              g_clear_error (&local_error);
+            }
         }
       else
         {
@@ -2439,18 +2709,42 @@ flatpak_context_export (FlatpakContext *context,
       g_autoptr(GFile) apps_dir = g_file_get_parent (app_id_dir);
       int i;
       /* Hide the .var/app dir by default (unless explicitly made visible) */
-      flatpak_exports_add_path_tmpfs (exports, flatpak_file_get_path_cached (apps_dir));
+      if (!flatpak_exports_add_path_tmpfs (exports,
+                                           flatpak_file_get_path_cached (apps_dir),
+                                           &local_error))
+        {
+          log_cannot_export_error (FLATPAK_FILESYSTEM_MODE_NONE,
+                                   flatpak_file_get_path_cached (apps_dir),
+                                   local_error);
+          g_clear_error (&local_error);
+        }
+
       /* But let the app write to the per-app dir in it */
-      flatpak_exports_add_path_expose (exports, FLATPAK_FILESYSTEM_MODE_READ_WRITE,
-                                       flatpak_file_get_path_cached (app_id_dir));
+      if (!flatpak_exports_add_path_expose (exports, FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                            flatpak_file_get_path_cached (app_id_dir),
+                                            &local_error))
+        {
+          log_cannot_export_error (FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                   flatpak_file_get_path_cached (apps_dir),
+                                   local_error);
+          g_clear_error (&local_error);
+        }
 
       if (extra_app_id_dirs != NULL)
         {
           for (i = 0; i < extra_app_id_dirs->len; i++)
             {
               GFile *extra_app_id_dir = g_ptr_array_index (extra_app_id_dirs, i);
-              flatpak_exports_add_path_expose (exports, FLATPAK_FILESYSTEM_MODE_READ_WRITE,
-                                               flatpak_file_get_path_cached (extra_app_id_dir));
+              if (!flatpak_exports_add_path_expose (exports,
+                                                    FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                                    flatpak_file_get_path_cached (extra_app_id_dir),
+                                                    &local_error))
+                {
+                  log_cannot_export_error (FLATPAK_FILESYSTEM_MODE_READ_WRITE,
+                                           flatpak_file_get_path_cached (extra_app_id_dir),
+                                           local_error);
+                  g_clear_error (&local_error);
+                }
             }
         }
     }
@@ -2514,13 +2808,27 @@ flatpak_context_get_exports_full (FlatpakContext *context,
   if (include_default_dirs)
     {
       g_autoptr(GFile) user_flatpak_dir = NULL;
+      g_autoptr(GError) local_error = NULL;
 
       /* Hide the flatpak dir by default (unless explicitly made visible) */
       user_flatpak_dir = flatpak_get_user_base_dir_location ();
-      flatpak_exports_add_path_tmpfs (exports, flatpak_file_get_path_cached (user_flatpak_dir));
+      if (!flatpak_exports_add_path_tmpfs (exports,
+                                           flatpak_file_get_path_cached (user_flatpak_dir),
+                                           &local_error))
+        {
+          log_cannot_export_error (FLATPAK_FILESYSTEM_MODE_NONE,
+                                   flatpak_file_get_path_cached (user_flatpak_dir),
+                                   local_error);
+          g_clear_error (&local_error);
+        }
 
       /* Ensure we always have a homedir */
-      flatpak_exports_add_path_dir (exports, g_get_home_dir ());
+      if (!flatpak_exports_add_path_dir (exports, g_get_home_dir (), &local_error))
+        {
+          g_warning (_("Unable to provide a temporary home directory in the sandbox: %s"),
+                     local_error->message);
+          g_clear_error (&local_error);
+        }
     }
 
   return g_steal_pointer (&exports);
@@ -2552,7 +2860,8 @@ flatpak_context_append_bwrap_filesystem (FlatpakContext  *context,
           g_autofree char *src = g_build_filename (g_get_home_dir (), ".var/app", app_id, persist, NULL);
           g_autofree char *dest = g_build_filename (g_get_home_dir (), persist, NULL);
 
-          g_mkdir_with_parents (src, 0755);
+          if (g_mkdir_with_parents (src, 0755) != 0)
+            g_debug ("Unable to create directory %s", src);
 
           flatpak_bwrap_add_bind_arg (bwrap, "--bind", src, dest);
         }

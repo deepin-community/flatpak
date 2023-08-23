@@ -1,4 +1,4 @@
-/*
+/* vi:set et sw=2 sts=2 cin cino=t0,f0,(0,{s,>2s,n-s,^-s,e-s:
  * Copyright © 2015 Red Hat, Inc
  *
  * This program is free software; you can redistribute it and/or
@@ -1714,7 +1714,7 @@ flatpak_installation_load_app_overrides (FlatpakInstallation *self,
   if (dir == NULL)
     return NULL;
 
-  metadata_contents = flatpak_dir_load_override (dir, app_id, &metadata_size, error);
+  metadata_contents = flatpak_dir_load_override (dir, app_id, &metadata_size, NULL, error);
   if (metadata_contents == NULL)
     return NULL;
 
@@ -1926,7 +1926,7 @@ flatpak_installation_install_full (FlatpakInstallation    *self,
                             (flags & FLATPAK_INSTALL_FLAGS_NO_PULL) != 0,
                             (flags & FLATPAK_INSTALL_FLAGS_NO_DEPLOY) != 0,
                             (flags & FLATPAK_INSTALL_FLAGS_NO_STATIC_DELTAS) != 0,
-                            FALSE, FALSE, state,
+                            FALSE, FALSE, FALSE, state,
                             ref, NULL, (const char **) subpaths, NULL, NULL, NULL, NULL,
                             progress, cancellable, error))
     return NULL;
@@ -2543,7 +2543,6 @@ flatpak_installation_fetch_remote_ref_sync_full (FlatpakInstallation *self,
   if (dir == NULL)
     return NULL;
 
-
   ref = flatpak_decomposed_new_from_parts (flatpak_kinds_from_kind (kind), name, arch, branch, error);
   if (ref == NULL)
     return NULL;
@@ -2565,7 +2564,8 @@ flatpak_installation_fetch_remote_ref_sync_full (FlatpakInstallation *self,
     return flatpak_remote_ref_new (ref, checksum, remote_name, state->collection_id, state);
 
   g_set_error (error, FLATPAK_ERROR, FLATPAK_ERROR_REF_NOT_FOUND,
-               "Reference %s doesn't exist in remote", flatpak_decomposed_get_ref (ref));
+               "Reference %s doesn't exist in remote %s",
+               flatpak_decomposed_get_ref (ref), remote_name);
   return NULL;
 }
 
@@ -2751,15 +2751,18 @@ flatpak_installation_list_remote_related_refs_sync (FlatpakInstallation *self,
 /**
  * flatpak_installation_list_installed_related_refs_sync:
  * @self: a #FlatpakInstallation
- * @remote_name: the name of the remote
+ * @remote_name: the name of the remote providing @ref
  * @ref: the ref
  * @cancellable: (nullable): a #GCancellable
  * @error: return location for a #GError
  *
- * Lists all the locally installed refs from @remote_name that are
- * related to @ref. These are things that are interesting to install,
- * update, or uninstall together with @ref. For instance, locale data
- * or debug information.
+ * Lists all the locally installed refs that are related to @ref. These are
+ * things that are interesting to install, update, or uninstall together with
+ * @ref. For instance, locale data or debug information.
+ *
+ * Note that while the related refs are usually installed from the same remote
+ * as @ref (@remote_name), it is possible they were installed from another
+ * remote.
  *
  * This function is similar to flatpak_installation_list_remote_related_refs_sync,
  * but instead of looking at what is available on the remote, it only looks

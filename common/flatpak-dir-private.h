@@ -28,7 +28,7 @@
 #include "flatpak-progress-private.h"
 #include "flatpak-variant-private.h"
 #include "flatpak-ref-utils-private.h"
-#include "libglnx/libglnx.h"
+#include "libglnx.h"
 
 /* Version history:
  * The version field was added in flatpak 1.2, anything before is 0.
@@ -70,6 +70,7 @@ GType flatpak_deploy_get_type (void);
 #define FLATPAK_REF_BRANCH_KEY "Branch"
 #define FLATPAK_REF_COLLECTION_ID_KEY "CollectionID"
 #define FLATPAK_REF_DEPLOY_COLLECTION_ID_KEY "DeployCollectionID"
+#define FLATPAK_REF_DEPLOY_SIDELOAD_COLLECTION_ID_KEY "DeploySideloadCollectionID"
 
 #define FLATPAK_REPO_GROUP "Flatpak Repo"
 #define FLATPAK_REPO_VERSION_KEY "Version"
@@ -89,6 +90,7 @@ GType flatpak_deploy_get_type (void);
 
 #define FLATPAK_REPO_COLLECTION_ID_KEY "CollectionID"
 #define FLATPAK_REPO_DEPLOY_COLLECTION_ID_KEY "DeployCollectionID"
+#define FLATPAK_REPO_DEPLOY_SIDELOAD_COLLECTION_ID_KEY "DeploySideloadCollectionID"
 
 #define FLATPAK_CLI_UPDATE_INTERVAL_MS 300
 
@@ -100,6 +102,7 @@ GType flatpak_deploy_get_type (void);
 typedef struct
 {
   FlatpakDecomposed *ref;
+  char              *remote;
   char              *commit;
   char             **subpaths;
   gboolean           download;
@@ -197,8 +200,8 @@ GVariant *flatpak_remote_state_load_ref_commit (FlatpakRemoteState *self,
                                                 char              **out_commit,
                                                 GCancellable       *cancellable,
                                                 GError            **error);
-void flatpak_remote_state_add_sideload_repo (FlatpakRemoteState *self,
-                                             GFile               *path);
+void flatpak_remote_state_add_sideload_dir (FlatpakRemoteState *self,
+                                            GFile              *path);
 
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (FlatpakDir, g_object_unref)
@@ -215,7 +218,7 @@ typedef enum {
   FLATPAK_HELPER_DEPLOY_FLAGS_NO_INTERACTION = 1 << 4,
   FLATPAK_HELPER_DEPLOY_FLAGS_APP_HINT = 1 << 5,
   FLATPAK_HELPER_DEPLOY_FLAGS_INSTALL_HINT = 1 << 6,
-  FLATPAK_HELPER_DEPLOY_FLAGS,
+  FLATPAK_HELPER_DEPLOY_FLAGS_UPDATE_PINNED = 1 << 7,
 } FlatpakHelperDeployFlags;
 
 #define FLATPAK_HELPER_DEPLOY_FLAGS_ALL (FLATPAK_HELPER_DEPLOY_FLAGS_UPDATE | \
@@ -224,7 +227,8 @@ typedef enum {
                                          FLATPAK_HELPER_DEPLOY_FLAGS_REINSTALL | \
                                          FLATPAK_HELPER_DEPLOY_FLAGS_NO_INTERACTION | \
                                          FLATPAK_HELPER_DEPLOY_FLAGS_APP_HINT | \
-                                         FLATPAK_HELPER_DEPLOY_FLAGS_INSTALL_HINT)
+                                         FLATPAK_HELPER_DEPLOY_FLAGS_INSTALL_HINT | \
+                                         FLATPAK_HELPER_DEPLOY_FLAGS_UPDATE_PINNED)
 
 typedef enum {
   FLATPAK_HELPER_UNINSTALL_FLAGS_NONE = 0,
@@ -558,6 +562,7 @@ FlatpakDeploy *       flatpak_dir_load_deployed                             (Fla
 char *                flatpak_dir_load_override                             (FlatpakDir                    *dir,
                                                                              const char                    *app_id,
                                                                              gsize                         *length,
+                                                                             GFile                        **file_out,
                                                                              GError                       **error);
 OstreeRepo *          flatpak_dir_get_repo                                  (FlatpakDir                    *self);
 gboolean              flatpak_dir_ensure_path                               (FlatpakDir                    *self,
@@ -644,8 +649,17 @@ GPtrArray *           flatpak_dir_list_refs                                 (Fla
                                                                              FlatpakKinds                   kinds,
                                                                              GCancellable                  *cancellable,
                                                                              GError                       **error);
+gboolean              flatpak_dir_is_runtime_extension                      (FlatpakDir                    *self,
+                                                                             FlatpakDecomposed             *ref);
 GPtrArray *           flatpak_dir_list_app_refs_with_runtime                (FlatpakDir                    *self,
+                                                                             GHashTable                   **runtime_app_map,
                                                                              FlatpakDecomposed             *runtime_ref,
+                                                                             GCancellable                  *cancellable,
+                                                                             GError                       **error);
+GPtrArray *           flatpak_dir_list_app_refs_with_runtime_extension      (FlatpakDir                    *self,
+                                                                             GHashTable                   **runtime_app_map,
+                                                                             GHashTable                   **extension_app_map,
+                                                                             FlatpakDecomposed             *runtime_ext_ref,
                                                                              GCancellable                  *cancellable,
                                                                              GError                       **error);
 GVariant *            flatpak_dir_read_latest_commit                        (FlatpakDir                    *self,
@@ -714,6 +728,7 @@ gboolean              flatpak_dir_deploy_install                            (Fla
                                                                              const char                   **subpaths,
                                                                              const char                   **previous_ids,
                                                                              gboolean                       reinstall,
+                                                                             gboolean                       pin_on_deploy,
                                                                              GCancellable                  *cancellable,
                                                                              GError                       **error);
 gboolean              flatpak_dir_install                                   (FlatpakDir                    *self,
@@ -722,6 +737,7 @@ gboolean              flatpak_dir_install                                   (Fla
                                                                              gboolean                       no_static_deltas,
                                                                              gboolean                       reinstall,
                                                                              gboolean                       app_hint,
+                                                                             gboolean                       pin_on_deploy,
                                                                              FlatpakRemoteState            *state,
                                                                              FlatpakDecomposed             *ref,
                                                                              const char                    *opt_commit,

@@ -277,12 +277,19 @@
 <col width="300px" class="properties_name">
 <col width="200px" class="properties_flags">
 </colgroup>
-<tbody><tr>
+<tbody>
+<tr>
 <td class="property_type">
 <a class="link" href="FlatpakInstallation.html" title="FlatpakInstallation"><span class="type">FlatpakInstallation</span></a> *</td>
 <td class="property_name"><a class="link" href="FlatpakTransaction.html#FlatpakTransaction--installation" title="The “installation” property">installation</a></td>
 <td class="property_flags">Read / Write / Construct Only</td>
-</tr></tbody>
+</tr>
+<tr>
+<td class="property_type"><a href="https://developer.gnome.org/glib/unstable/glib-Basic-Types.html#gboolean"><span class="type">gboolean</span></a></td>
+<td class="property_name"><a class="link" href="FlatpakTransaction.html#FlatpakTransaction--no-interaction" title="The “no-interaction” property">no-interaction</a></td>
+<td class="property_flags">Read / Write</td>
+</tr>
+</tbody>
 </table></div>
 </div>
 <div class="refsect1">
@@ -771,7 +778,8 @@ set on failure.</p>
 flatpak_transaction_add_uninstall (<em class="parameter"><code><a class="link" href="FlatpakTransaction.html" title="FlatpakTransaction"><span class="type">FlatpakTransaction</span></a> *self</code></em>,
                                    <em class="parameter"><code>const <span class="type">char</span> *ref</code></em>,
                                    <em class="parameter"><code><a href="https://developer.gnome.org/glib/unstable/glib-Error-Reporting.html#GError"><span class="type">GError</span></a> **error</code></em>);</pre>
-<p>Adds uninstalling the given ref to this transaction.</p>
+<p>Adds uninstalling the given ref to this transaction. If the transaction is
+set to not deploy updates, the request is ignored.</p>
 <div class="refsect3">
 <a name="flatpak-transaction-add-uninstall.parameters"></a><h4>Parameters</h4>
 <div class="informaltable"><table class="informaltable" width="100%" border="0">
@@ -1611,6 +1619,17 @@ window with a browser, but the user closed it before it was finished.</p>
 <p>Owner: FlatpakTransaction</p>
 <p>Flags: Read / Write / Construct Only</p>
 </div>
+<hr>
+<div class="refsect2">
+<a name="FlatpakTransaction--no-interaction"></a><h3>The <code class="literal">“no-interaction”</code> property</h3>
+<pre class="programlisting">  “no-interaction”           <a href="https://developer.gnome.org/glib/unstable/glib-Basic-Types.html#gboolean"><span class="type">gboolean</span></a></pre>
+<p><a href="https://developer.gnome.org/glib/unstable/glib-Standard-Macros.html#TRUE:CAPS"><code class="literal">TRUE</code></a> if the transaction is not interactive, <a href="https://developer.gnome.org/glib/unstable/glib-Standard-Macros.html#FALSE:CAPS"><code class="literal">FALSE</code></a> otherwise.</p>
+<p>See <code class="function">flatpak_transaction_set_no_interaction()</code>.</p>
+<p>Owner: FlatpakTransaction</p>
+<p>Flags: Read / Write</p>
+<p>Default value: FALSE</p>
+<p class="since">Since: 1.13.0</p>
+</div>
 </div>
 <div class="refsect1">
 <a name="FlatpakTransaction.signal-details"></a><h2>Signal Details</h2>
@@ -1920,6 +1939,7 @@ be skipped (e.g. because the rebased ref has been added to the
 transaction), <a href="https://developer.gnome.org/glib/unstable/glib-Standard-Macros.html#FALSE:CAPS"><code class="literal">FALSE</code></a> if it should remain.</p>
 </div>
 <p>Flags: <a href="https://developer.gnome.org/gobject/unstable/gobject-Signals.html#G-SIGNAL-RUN-LAST:CAPS">Run Last</a></p>
+<p class="since">Since: 1.3.2</p>
 </div>
 <hr>
 <div class="refsect2">
@@ -1969,7 +1989,7 @@ the signal handler fails the transaction will error out.</p>
 </table></div>
 </div>
 <p>Flags: <a href="https://developer.gnome.org/gobject/unstable/gobject-Signals.html#G-SIGNAL-RUN-LAST:CAPS">Run Last</a></p>
-<p class="since">Since: 1.7.4</p>
+<p class="since">Since: 1.8.0</p>
 </div>
 <hr>
 <div class="refsect2">
@@ -2164,14 +2184,16 @@ that will be executed as part of the transaction.</p>
 <pre class="programlisting"><a href="https://developer.gnome.org/glib/unstable/glib-Basic-Types.html#gboolean"><span class="returnvalue">gboolean</span></a>
 user_function (<a class="link" href="FlatpakTransaction.html" title="FlatpakTransaction"><span class="type">FlatpakTransaction</span></a> *object,
                <a href="https://developer.gnome.org/glib/unstable/glib-Basic-Types.html#gpointer"><span class="type">gpointer</span></a>            user_data)</pre>
-<p>The ::ready-pre-auth signal is emitted when all the refs involved in the transaction
-have been resolved to commits, but we might not necessarily have asked for authenticaion
-for all their required operations. This is very similar to the ::ready signal, and you can
-chose which one (or both) to use depending on how you want to handle authentication in your user
+<p>The ::ready-pre-auth signal is emitted when all the refs involved in the
+transaction have been resolved to commits, but we might not necessarily
+have asked for authentication for all their required operations. This is
+very similar to the ::ready signal, and you can choose which one (or both)
+to use depending on how you want to handle authentication in your user
 interface.</p>
-<p>At this point <a class="link" href="FlatpakTransaction.html#flatpak-transaction-get-operations" title="flatpak_transaction_get_operations ()"><code class="function">flatpak_transaction_get_operations()</code></a> will return all the operations
-that will be executed as part of the transaction. You can call <code class="function">flatpak_transaction_operation_get_requires_authentication()</code>
-to see which will require authentication.</p>
+<p>At this point <a class="link" href="FlatpakTransaction.html#flatpak-transaction-get-operations" title="flatpak_transaction_get_operations ()"><code class="function">flatpak_transaction_get_operations()</code></a> will return all the
+operations that will be executed as part of the transaction. You can call
+<code class="function">flatpak_transaction_operation_get_requires_authentication()</code> to see which
+will require authentication.</p>
 <div class="refsect3">
 <a name="FlatpakTransaction-ready-pre-auth.parameters"></a><h4>Parameters</h4>
 <div class="informaltable"><table class="informaltable" width="100%" border="0">
@@ -2199,6 +2221,7 @@ to see which will require authentication.</p>
 <p> <a href="https://developer.gnome.org/glib/unstable/glib-Standard-Macros.html#TRUE:CAPS"><code class="literal">TRUE</code></a> to carry on with the transaction, <a href="https://developer.gnome.org/glib/unstable/glib-Standard-Macros.html#FALSE:CAPS"><code class="literal">FALSE</code></a> to abort</p>
 </div>
 <p>Flags: <a href="https://developer.gnome.org/gobject/unstable/gobject-Signals.html#G-SIGNAL-RUN-LAST:CAPS">Run Last</a></p>
+<p class="since">Since: 1.9.1</p>
 </div>
 <hr>
 <div class="refsect2">
