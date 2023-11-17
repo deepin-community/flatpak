@@ -9,6 +9,12 @@ if [ "$1" = "purge" ] && [ -e /var/lib/flatpak ]; then
     rm -f /var/lib/flatpak/.changed
     rmdir --ignore-fail-on-non-empty /var/lib/flatpak
 fi
+if [ -f /etc/profile.d/flatpak.sh ]; then
+
+    rm /etc/profile.d/flatpak.sh
+
+fi
+
 
 exit 0
 

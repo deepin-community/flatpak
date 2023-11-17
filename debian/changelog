@@ -1,3 +1,9 @@
+flatpak (1.14.4-1deepin1) unstable; urgency=medium
+
+  * remove /etc/flatpak.sh .
+
+ -- LiChengGang <lichenggang@uniontech.com>  Fri, 17 Nov 2023 17:31:38 +0800
+
 flatpak (1.14.4-1) unstable; urgency=high
 
   * New upstream security fix release
