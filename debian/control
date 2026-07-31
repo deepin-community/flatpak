@@ -1,40 +1,44 @@
 Source: flatpak
 Section: admin
+Priority: optional
 Maintainer: Utopia Maintenance Team <pkg-utopia-maintainers@lists.alioth.debian.org>
 Uploaders:
  Matthias Klumpp <mak@debian.org>,
  Simon McVittie <smcv@debian.org>,
 # We need polkitd, socat, etc. if !nocheck || !noinsttest
 Build-Depends:
- debhelper (>= 13.11.6~),
- debhelper-compat (= 13),
- dh-exec (>= 0.23~),
- dh-sequence-gir,
  attr <!nocheck>,
  bison,
  bubblewrap (>= 0.10.0~),
  ca-certificates <!nocheck>,
+ curl <!nocheck>,
  dbus-daemon,
+ debhelper (>= 13.11.6~),
+ debhelper-compat (= 13),
  desktop-file-utils <!nocheck>,
+ dh-exec (>= 0.23~),
+ dh-sequence-gir,
  docbook-xml <!nodoc>,
  docbook-xsl <!nodoc>,
  fuse3,
  gir1.2-gio-2.0-dev,
  gir1.2-gobject-2.0-dev,
  gnupg <!nocheck>,
- gobject-introspection (>= 1.80),
+ gobject-introspection (>= 1.54.1-2~),
+ gtk-doc-tools,
  gtk-update-icon-cache <!nocheck>,
  hicolor-icon-theme <!nocheck>,
  libappstream-dev (>= 0.12.0),
  libarchive-dev (>= 2.8.0),
  libattr1-dev,
  libcap-dev,
- libcurl4-openssl-dev | libcurl-dev,
+ libcurl4-gnutls-dev | libcurl-dev,
  libdconf-dev,
  libdw-dev,
  libelf-dev,
  libfuse3-dev (>= 3.1.1),
  libgdk-pixbuf-2.0-dev,
+ libgirepository1.0-dev,
  libglib2.0-dev (>= 2.44),
  libgpgme-dev (>= 1.1.8),
  libjson-glib-dev,
@@ -54,8 +58,8 @@ Build-Depends:
  pkgconf,
  polkitd <!nocheck> <!noinsttest>,
  procps,
- python3-pyparsing,
  python3:any,
+ python3-pyparsing,
  shared-mime-info <!nocheck>,
  socat <!nocheck> <!noinsttest>,
  wayland-protocols,
@@ -63,14 +67,13 @@ Build-Depends:
  xmlto <!nodoc>,
  xsltproc <!nodoc>,
 Build-Depends-Indep:
- gtk-doc-tools <!nodoc>,
- libglib2.0-doc <!nodoc>,
- libostree-doc <!nodoc>,
-Standards-Version: 4.7.3
+ libglib2.0-doc,
+ libostree-doc,
+Standards-Version: 4.7.2
 Homepage: https://flatpak.org/
-Vcs-Git: https://salsa.debian.org/debian/flatpak.git
+Vcs-Git: https://salsa.debian.org/debian/flatpak.git -b debian/trixie
 Vcs-Browser: https://salsa.debian.org/debian/flatpak
-X-Style: black
+Rules-Requires-Root: no
 
 Package: flatpak
 Architecture: linux-any
@@ -85,8 +88,8 @@ Recommends:
  ca-certificates,
  default-dbus-system-bus | dbus-system-bus,
  desktop-file-utils,
- gtk-update-icon-cache,
  hicolor-icon-theme,
+ gtk-update-icon-cache,
  libpam-systemd,
  p11-kit,
  polkitd,
@@ -126,6 +129,7 @@ Section: misc
 Depends:
  attr,
  ca-certificates,
+ curl,
  dbus-daemon,
  desktop-file-utils,
  flatpak (= ${binary:Version}),
@@ -165,10 +169,10 @@ Architecture: linux-any
 Multi-Arch: same
 Section: libdevel
 Depends:
- gir1.2-flatpak-1.0 (= ${binary:Version}),
  gir1.2-glib-2.0,
+ gir1.2-flatpak-1.0 (= ${binary:Version}),
  libarchive-dev (>= 2.8.0),
- libcurl4-openssl-dev | libcurl-dev,
+ libcurl4-gnutls-dev | libcurl-dev,
  libdconf-dev,
  libflatpak0 (= ${binary:Version}),
  libglib2.0-dev,
