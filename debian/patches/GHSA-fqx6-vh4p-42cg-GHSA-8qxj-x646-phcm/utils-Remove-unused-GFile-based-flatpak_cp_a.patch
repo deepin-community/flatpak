@@ -1,0 +1,67 @@
+From: Sebastian Wick <sebastian.wick@redhat.com>
+Date: Mon, 29 Jun 2026 20:18:40 +0200
+Subject: utils: Remove unused GFile based flatpak_cp_a
+
+We use the fd based flatpak_cp_a_at now everywhere, so we can drop this
+one.
+
+Bug: https://github.com/flatpak/flatpak/security/advisories/GHSA-fqx6-vh4p-42cg
+Bug: https://github.com/flatpak/flatpak/security/advisories/GHSA-8qxj-x646-phcm
+Origin: upstream, 1.18.1
+---
+ common/flatpak-utils-private.h |  6 ------
+ common/flatpak-utils.c         | 24 ------------------------
+ 2 files changed, 30 deletions(-)
+
+diff --git a/common/flatpak-utils-private.h b/common/flatpak-utils-private.h
+index 5cdab1a..b56a354 100644
+--- a/common/flatpak-utils-private.h
++++ b/common/flatpak-utils-private.h
+@@ -198,12 +198,6 @@ typedef enum {
+   FLATPAK_CP_FLAGS_NO_CHOWN = 1 << 1,
+ } FlatpakCpFlags;
+ 
+-gboolean   flatpak_cp_a (GFile         *src,
+-                         GFile         *dest,
+-                         FlatpakCpFlags flags,
+-                         GCancellable  *cancellable,
+-                         GError       **error);
+-
+ gboolean   flatpak_cp_a_at (int            src_dfd,
+                             int            dest_parent_dfd,
+                             const char    *dest_name,
+diff --git a/common/flatpak-utils.c b/common/flatpak-utils.c
+index 0f95931..c549514 100644
+--- a/common/flatpak-utils.c
++++ b/common/flatpak-utils.c
+@@ -1260,30 +1260,6 @@ flatpak_cp_a_at (int            src_dfd,
+   return TRUE;
+ }
+ 
+-gboolean
+-flatpak_cp_a (GFile         *src,
+-              GFile         *dest,
+-              FlatpakCpFlags flags,
+-              GCancellable  *cancellable,
+-              GError       **error)
+-{
+-  const char *src_path = flatpak_file_get_path_cached (src);
+-  g_autoptr(GFile) dest_parent = g_file_get_parent (dest);
+-  const char *dest_parent_path = flatpak_file_get_path_cached (dest_parent);
+-  const char *dest_name = glnx_basename (flatpak_file_get_path_cached (dest));
+-  glnx_autofd int src_dfd = -1;
+-  glnx_autofd int dest_parent_dfd = -1;
+-
+-  if (!glnx_opendirat (AT_FDCWD, src_path, FALSE, &src_dfd, error))
+-    return FALSE;
+-
+-  if (!glnx_opendirat (AT_FDCWD, dest_parent_path, FALSE, &dest_parent_dfd, error))
+-    return FALSE;
+-
+-  return flatpak_cp_a_at (src_dfd, dest_parent_dfd, dest_name, flags,
+-                          cancellable, error);
+-}
+-
+ static gboolean
+ _flatpak_canonicalize_permissions (int         parent_dfd,
+                                    const char *rel_path,

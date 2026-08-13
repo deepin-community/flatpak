@@ -1,0 +1,36 @@
+From: Sebastian Wick <sebastian.wick@redhat.com>
+Date: Mon, 3 Aug 2026 18:17:00 +0200
+Subject: dir: Fall back to the deployed ref commit when up/downgrading
+
+Otherwise, if an unprivileged user manages to remove the remote ref, the
+downgrading protection is not in effect.
+
+Bug: https://github.com/flatpak/flatpak/security/advisories/GHSA-q4gr-vc25-57m5
+Origin: upstream, 1.18.1
+---
+ common/flatpak-dir.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/common/flatpak-dir.c b/common/flatpak-dir.c
+index 4378212..400ad3e 100644
+--- a/common/flatpak-dir.c
++++ b/common/flatpak-dir.c
+@@ -6384,6 +6384,18 @@ flatpak_dir_pull_untrusted_local (FlatpakDir          *self,
+                                  &current_checksum, NULL, error))
+     return FALSE;
+ 
++  /* The remote tracking ref may be absent (e.g. the remote was removed and
++   * re-added, the app was installed from a bundle, or the ref was deleted by
++   * ostree-prune/flatpak-repair).  Fall back to the deploy/ ref that flatpak
++   * always writes on every successful deploy so that our downgrade check can
++   * work. */
++  if (current_checksum == NULL)
++    {
++      g_autofree char *deploy_ref = g_strconcat ("deploy/", ref, NULL);
++      flatpak_repo_resolve_rev (self->repo, NULL, NULL, deploy_ref, TRUE,
++                                &current_checksum, NULL, NULL);
++    }
++
+   if (current_checksum != NULL &&
+       !ostree_repo_load_commit (self->repo, current_checksum, &old_commit, NULL, error))
+     return FALSE;
