@@ -1,0 +1,92 @@
+From: Sebastian Wick <sebastian.wick@redhat.com>
+Date: Mon, 29 Jun 2026 21:51:46 +0200
+Subject: dir-utils: Reject path traversal in extension metadata
+
+Validate extension directory, subdir_suffix, add_ld_path, and
+merge_dirs at parse time, rejecting absolute paths and paths with
+.. components that escape the intended mount point. This prevents
+extension metadata from mounting content at unintended locations
+inside the sandbox.
+
+Bug: https://github.com/flatpak/flatpak/security/advisories/GHSA-w69g-9x8j-7p8f
+Origin: upstream, 1.18.1
+---
+ common/flatpak-dir-utils.c | 51 ++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/common/flatpak-dir-utils.c b/common/flatpak-dir-utils.c
+index e34b950..807fbc5 100644
+--- a/common/flatpak-dir-utils.c
++++ b/common/flatpak-dir-utils.c
+@@ -24,6 +24,7 @@
+ #include "flatpak-dir-private.h"
+ #include "flatpak-metadata-private.h"
+ #include "flatpak-utils-private.h"
++#include "flatpak-utils-base-private.h"
+ 
+ char **
+ flatpak_list_deployed_refs (const char   *type,
+@@ -393,6 +394,21 @@ flatpak_extension_new (const char        *id,
+   return ext;
+ }
+ 
++static gboolean
++relative_path_has_no_traversal (const char *path)
++{
++  if (path == NULL || *path == '\0' || *path == '/')
++    return FALSE;
++
++  if (strcmp (path, "..") == 0 ||
++      g_str_has_prefix (path, "../") ||
++      strstr (path, "/../") != NULL ||
++      g_str_has_suffix (path, "/.."))
++    return FALSE;
++
++  return TRUE;
++}
++
+ static GList *
+ add_extension (GKeyFile   *metakey,
+                const char *group,
+@@ -423,8 +439,39 @@ add_extension (GKeyFile   *metakey,
+   g_autoptr(GFile) deploy_dir = NULL;
+   g_autoptr(FlatpakDir) dir = NULL;
+ 
+-  if (directory == NULL)
+-    return res;
++  if (directory == NULL || !relative_path_has_no_traversal (directory))
++    {
++      g_warning ("Extension %s key %s is missing or has directory traversal, ignoring",
++                 extension, FLATPAK_METADATA_KEY_DIRECTORY);
++      return res;
++    }
++
++  if (subdir_suffix != NULL && !relative_path_has_no_traversal (subdir_suffix))
++    {
++      g_warning ("Extension %s key %s is missing or has directory traversal, ignoring",
++                 extension, FLATPAK_METADATA_KEY_SUBDIRECTORY_SUFFIX);
++      return res;
++    }
++
++  if (add_ld_path != NULL && !relative_path_has_no_traversal (add_ld_path))
++    {
++      g_warning ("Extension %s key %s is missing or has directory traversal, ignoring",
++                 extension, FLATPAK_METADATA_KEY_ADD_LD_PATH);
++      return res;
++    }
++
++  if (merge_dirs != NULL)
++    {
++      for (size_t i = 0; merge_dirs[i] != NULL; i++)
++        {
++          if (!relative_path_has_no_traversal (merge_dirs[i]))
++            {
++              g_warning ("Extension %s key %s is missing or has directory traversal, ignoring",
++                         extension, FLATPAK_METADATA_KEY_MERGE_DIRS);
++              return res;
++            }
++        }
++    }
+ 
+   ref = flatpak_decomposed_new_from_parts (FLATPAK_KINDS_RUNTIME, extension, arch, branch, NULL);
+   if (ref == NULL)

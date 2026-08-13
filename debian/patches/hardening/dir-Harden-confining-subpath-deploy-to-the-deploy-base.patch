@@ -1,0 +1,62 @@
+From: Sebastian Wick <sebastian.wick@redhat.com>
+Date: Mon, 29 Jun 2026 23:14:37 +0200
+Subject: dir: Harden confining subpath deploy to the deploy base
+
+Subpaths passed via D-Bus to the system helper are not validated, so
+a value containing ".." components is accepted.
+
+The only reason why this isn't exploitable is because we resolve the
+path relative to `root` via g_file_resolve_relative_path, where root is
+a OstreeRepoFile which will return FALSE when it encounters ".." or
+symlinks.
+
+Harden the code by using glnx_chase_and_mkdirat with RESOLVE_BENEATH to
+create parent directories, and check out into the resulting fd.
+
+Origin: upstream, 1.18.1
+---
+ common/flatpak-dir.c | 19 +++++++++----------
+ 1 file changed, 9 insertions(+), 10 deletions(-)
+
+diff --git a/common/flatpak-dir.c b/common/flatpak-dir.c
+index 6a9c192..4378212 100644
+--- a/common/flatpak-dir.c
++++ b/common/flatpak-dir.c
+@@ -8863,28 +8863,27 @@ flatpak_dir_deploy (FlatpakDir          *self,
+       for (i = 0; subpaths[i] != NULL; i++)
+         {
+           g_autofree char *subpath = g_build_filename ("files", subpaths[i], NULL);
+-          g_autofree char *dstpath = g_build_filename (checkoutdirpath, "/files", subpaths[i], NULL);
+-          g_autofree char *dstpath_parent = g_path_get_dirname (dstpath);
+-          g_autofree char *dstpath_relative_to_deploy_base = g_build_filename (checkoutdir_basename, "/files", subpaths[i], NULL);
++          g_autofree char *dstpath = g_build_filename (checkoutdir_basename, subpath, NULL);
++          g_autofree char *dstdir = g_path_get_dirname (dstpath);
++          g_autofree char *dstbase = g_path_get_basename (dstpath);
++          glnx_autofd int parent_dfd = -1;
+           g_autoptr(GFile) child = NULL;
+ 
+           child = g_file_resolve_relative_path (root, subpath);
+-
+           if (!g_file_query_exists (child, cancellable))
+             {
+               g_info ("subpath %s not in tree", subpaths[i]);
+               continue;
+             }
+ 
+-          if (g_mkdir_with_parents (dstpath_parent, 0755))
+-            {
+-              glnx_set_error_from_errno (error);
+-              return FALSE;
+-            }
++          parent_dfd = glnx_chase_and_mkdirat (deploy_base_dfd, dstdir,
++                                               GLNX_CHASE_RESOLVE_BENEATH, 0755, error);
++          if (parent_dfd < 0)
++            return FALSE;
+ 
+           options.subpath = subpath;
+           if (!ostree_repo_checkout_at (self->repo, &options,
+-                                        deploy_base_dfd, dstpath_relative_to_deploy_base,
++                                        parent_dfd, dstbase,
+                                         checksum,
+                                         cancellable, error))
+             {

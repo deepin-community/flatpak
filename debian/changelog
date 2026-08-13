@@ -1,3 +1,71 @@
+flatpak (1.16.6-1~deb13u2) trixie-security; urgency=high
+
+  * d/patches: Backport security fixes from 1.18.1 (Closes: #1144130)
+    - d/p/libglnx/*.patch:
+      Backport glnx_chase_and_mkdirat() utility function, required by some
+      of the security fixes below
+    - d/p/tests/*.patch:
+      Backport unit tests fixes which are required by the tests for some
+      of the security fixes below
+    - d/p/GHSA-fqx6-vh4p-42cg-GHSA-8qxj-x646-phcm/*.patch:
+      + GHSA-fqx6-vh4p-42cg:
+        Fix writing outside installation directory via crafted commit metadata.
+        A malicious or compromised Flatpak repository could write
+        attacker-controlled files outside /var/lib/flatpak as root.
+      + GHSA-8qxj-x646-phcm:
+        Fix writing outside working directory in `flatpak build-init`.
+        A malicious or compromised SDK could write outside the intended
+        working directory when a developer starts using it for a build.
+    - d/p/GHSA-qrwq-7qwx-q9rp/*.patch:
+      Fix local privilege escalation involving revokefs.
+      A malicious local user could write files outside /var/lib/flatpak
+      as root by tampering with OSTree objects after signature verification.
+    - d/p/GHSA-8688-9x26-hhxj/*.patch:
+      Fix a sandbox escape involving directories inside ~/.var/app/APP_ID.
+      A malicious or compromised Flatpak app could write to arbitrary files
+      outside its sandbox.
+    - d/p/GHSA-99wv-m8rp-g58x/*.patch:
+      Fix a sandbox escape involving the ld.so cache.
+      A malicious or compromised Flatpak app could write files with a fixed
+      name and limited control over content outside the sandbox.
+    - d/p/GHSA-v2gw-v9h5-9q4x/*.patch:
+      Fix local privilege escalation involving crafted OCI architecture names.
+      A malicious local user on a system with an OCI remote configured
+      (unusual on non-Fedora systems) could trick the flatpak-system-helper
+      process into writing outside /var/lib/flatpak.
+    - d/p/GHSA-w69g-9x8j-7p8f/*.patch:
+      Fix reading outside sandbox involving crafted extension metadata.
+      A malicious or compromised Flatpak app could find out whether specific
+      files exist outside the sandbox.
+    - d/p/GHSA-q4gr-vc25-57m5/*.patch:
+      Fix anti-downgrade checks for components installed system-wide.
+      A malicious local user with an active local login session could
+      downgrade an app, runtime or extension to an older, known-vulnerable
+      version and use this to attack other local users.
+    - d/p/GHSA-jr92-2v97-wgvc/*.patch:
+      Fix a buffer overflow when installing or updating from a malicious OCI
+      registry, not believed to be practically exploitable on 64-bit systems.
+    - d/p/hardening/*.patch:
+      Harden file accesses against path traversal, fixing issues that
+      were initially thought to be security vulnerabilities similar to
+      those above, but on further analysis do not seem to be exploitable.
+    - d/p/GHSA-r7hp-698j-2h6c/*.patch:
+      Correct xdg-dbus-proxy rules for receiving selected AT-SPI broadcasts
+      so that GTK accessibility features work as intended.
+      Previously, these accessibility features only worked accidentally as a
+      result of an xdg-dbus-proxy security issue, fixed in 0.1.8.
+  * d/patches: Add additional bug fixes from upstream 1.16.x branch
+    - d/p/subprojects-Ignore-.wraplock-file-generated-by-recent-Mes.patch,
+      d/p/bwrap-Clarify-a-comment.patch,
+      d/p/subprojects-Update-dbus-proxy.wrap-to-v0.1.7.patch:
+      Resync with upstream source, no functional changes
+    - d/p/dir-Use-flatpak_bwrap_child_setup_inherit_fds_cb-to-apply.patch:
+      Silence a spurious warning when apps use the extra_data mechanism
+    - d/p/portal-Actually-use-the-AppInfo-hash-table.patch:
+      Fix a memory leak and potential rare crashes in flatpak-portal
+
+ -- Simon McVittie <smcv@debian.org>  Tue, 11 Aug 2026 14:03:38 +0100
+
 flatpak (1.16.6-1~deb13u1) trixie-security; urgency=high
 
   * Backport new upstream stable release for Debian 13

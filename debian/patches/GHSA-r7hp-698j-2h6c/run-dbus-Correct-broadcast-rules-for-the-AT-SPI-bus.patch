@@ -1,0 +1,34 @@
+From: Simon McVittie <smcv@collabora.com>
+Date: Sun, 26 Jul 2026 15:23:32 +0100
+Subject: run-dbus: Correct --broadcast rules for the AT-SPI bus
+
+These had the *INTERFACE*.*METHOD* where the bus name should have been,
+and a blank interface/method (meaning match any interface/method).
+Because there's no bus name of that name on the AT-SPI bus, the only reason
+why Flatpak apps were able to receive these broadcasts is that there was
+a vulnerability in xdg-dbus-proxy, tracked as GHSA-r7hp-698j-2h6c. To
+avoid regressions in Flatpak when the x-d-p vulnerability is fixed,
+we need to correct these rules to have the intended bus name.
+
+Signed-off-by: Simon McVittie <smcv@collabora.com>
+Bug: https://github.com/flatpak/xdg-dbus-proxy/security/advisories/GHSA-r7hp-698j-2h6c
+Origin: upstream, 1.18.1
+---
+ common/flatpak-run-dbus.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/common/flatpak-run-dbus.c b/common/flatpak-run-dbus.c
+index 20f0231..1d60c14 100644
+--- a/common/flatpak-run-dbus.c
++++ b/common/flatpak-run-dbus.c
+@@ -451,8 +451,8 @@ flatpak_run_add_a11y_dbus_args (FlatpakBwrap    *app_bwrap,
+   flatpak_bwrap_add_args (proxy_arg_bwrap,
+                           a11y_address,
+                           proxy_socket, "--filter", "--sloppy-names",
+-                          "--broadcast=org.a11y.atspi.Registry.EventListenerRegistered=@/org/a11y/atspi/registry",
+-                          "--broadcast=org.a11y.atspi.Registry.EventListenerDeregistered=@/org/a11y/atspi/registry",
++                          "--broadcast=org.a11y.atspi.Registry=org.a11y.atspi.Registry.EventListenerRegistered@/org/a11y/atspi/registry",
++                          "--broadcast=org.a11y.atspi.Registry=org.a11y.atspi.Registry.EventListenerDeregistered@/org/a11y/atspi/registry",
+                           "--call=org.a11y.atspi.Registry=org.a11y.atspi.Socket.Embed@/org/a11y/atspi/accessible/root",
+                           "--call=org.a11y.atspi.Registry=org.a11y.atspi.Socket.Unembed@/org/a11y/atspi/accessible/root",
+                           "--call=org.a11y.atspi.Registry=org.a11y.atspi.Registry.GetRegisteredEvents@/org/a11y/atspi/registry",

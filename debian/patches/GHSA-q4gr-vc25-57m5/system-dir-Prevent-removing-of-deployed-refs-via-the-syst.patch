@@ -1,0 +1,193 @@
+From: Sebastian Wick <sebastian.wick@redhat.com>
+Date: Mon, 3 Aug 2026 19:20:01 +0200
+Subject: system-dir: Prevent removing of deployed refs via the system-helper
+
+We have two use cases for removing refs: uninstalling, and pruning of
+undeployed refs. Pruning undeployed refs is something we want anyone to
+be able to do, because they can also pull updates and then not deploy
+them. Uninstalling arbitrary refs on the other hand is problematic, and
+its possible to remove the AppStream ref, and a deployed ref.
+
+So we split removing a ref into a function which removes any ref, and
+use it internally to implement e.g. uninstalling, and a function to
+remove refs which are safe to remove. Only the latter one will escalate
+through the system helper, making it harder for unprivileged users to
+get into a state which can be exploited.
+
+See the previous commit for such a state.
+
+Bug: https://github.com/flatpak/flatpak/security/advisories/GHSA-q4gr-vc25-57m5
+Origin: upstream, 1.18.1
+---
+ common/flatpak-dir-private.h          |  5 +++
+ common/flatpak-dir.c                  | 72 +++++++++++++++++++++++++++--------
+ common/flatpak-installation.c         |  8 ++--
+ system-helper/flatpak-system-helper.c |  2 +-
+ 4 files changed, 68 insertions(+), 19 deletions(-)
+
+diff --git a/common/flatpak-dir-private.h b/common/flatpak-dir-private.h
+index 1e25cb1..50793b2 100644
+--- a/common/flatpak-dir-private.h
++++ b/common/flatpak-dir-private.h
+@@ -772,6 +772,11 @@ gboolean              flatpak_dir_remove_ref                                (Fla
+                                                                              const char                    *ref,
+                                                                              GCancellable                  *cancellable,
+                                                                              GError                       **error);
++gboolean              flatpak_dir_remove_undeployed_ref                     (FlatpakDir                    *self,
++                                                                             const char                    *remote_name,
++                                                                             const char                    *ref,
++                                                                             GCancellable                  *cancellable,
++                                                                             GError                       **error);
+ gboolean              flatpak_dir_update_exports                            (FlatpakDir                    *self,
+                                                                              const char                    *app,
+                                                                              GCancellable                  *cancellable,
+diff --git a/common/flatpak-dir.c b/common/flatpak-dir.c
+index 400ad3e..f4c3d27 100644
+--- a/common/flatpak-dir.c
++++ b/common/flatpak-dir.c
+@@ -11420,25 +11420,61 @@ flatpak_dir_undeploy_all (FlatpakDir        *self,
+  * flatpak_dir_remove_ref:
+  * @self: a #FlatpakDir
+  * @remote_name: the name of the remote
+- * @ref: the flatpak ref to remove
++ * @ref: the ref to remove
+  * @cancellable: (nullable) (optional): a #GCancellable
+  * @error: a #GError
+  *
+- * Remove the flatpak ref given by @remote_name:@ref from the underlying
+- * OSTree repo. Attempting to remove a ref that is currently deployed
+- * is an error, you need to uninstall the flatpak first. Note that this does
+- * not remove the objects bound to @ref from the disk, you will need to
+- * call flatpak_dir_prune() to do that.
++ * Remove the ref given by @remote_name:@ref from the underlying
++ * OSTree repo. Note that this does not remove the objects bound to
++ * @ref from the disk, you will need to call flatpak_dir_prune()
++ * to do that.
+  *
+  * Returns: %TRUE if removing the ref succeeded, %FALSE otherwise.
+  */
+ gboolean
+ flatpak_dir_remove_ref (FlatpakDir        *self,
+                         const char        *remote_name,
+-                        const char        *ref, /* NOTE: Not necessarily a app/runtime ref */
++                        const char        *ref,
+                         GCancellable      *cancellable,
+                         GError           **error)
+ {
++  if (!ostree_repo_set_ref_immediate (self->repo,
++                                      remote_name,
++                                      ref,
++                                      NULL,
++                                      cancellable,
++                                      error))
++    return FALSE;
++
++  return TRUE;
++}
++
++/**
++ * flatpak_dir_remove_undeployed_ref:
++ * @self: a #FlatpakDir
++ * @remote_name: the name of the remote
++ * @ref: the flatpak ref to remove
++ * @cancellable: (nullable) (optional): a #GCancellable
++ * @error: a #GError
++ *
++ * Remove the flatpak ref given by @remote_name:@ref from the underlying
++ * OSTree repo. The ref must be a valid app or runtime ref, and it must
++ * not be currently deployed. Note that this does not remove the objects
++ * bound to @ref from the disk, you will need to call
++ * flatpak_dir_prune() to do that.
++ *
++ * Returns: %TRUE if removing the ref succeeded, %FALSE otherwise.
++ */
++gboolean
++flatpak_dir_remove_undeployed_ref (FlatpakDir    *self,
++                                   const char    *remote_name,
++                                   const char    *ref,
++                                   GCancellable  *cancellable,
++                                   GError       **error)
++{
++  g_autoptr(FlatpakDecomposed) decomposed = NULL;
++  g_autoptr(GBytes) deploy_data = NULL;
++
+   if (flatpak_dir_use_system_helper (self, NULL))
+     {
+       const char *installation = flatpak_dir_get_id (self);
+@@ -11455,15 +11491,21 @@ flatpak_dir_remove_ref (FlatpakDir        *self,
+       return TRUE;
+     }
+ 
+-  if (!ostree_repo_set_ref_immediate (self->repo,
+-                                      remote_name,
+-                                      ref,
+-                                      NULL,
+-                                      cancellable,
+-                                      error))
++  decomposed = flatpak_decomposed_new_from_ref (ref, error);
++  if (decomposed == NULL)
+     return FALSE;
+ 
+-  return TRUE;
++  deploy_data = flatpak_dir_get_deploy_data (self, decomposed,
++                                             FLATPAK_DEPLOY_VERSION_ANY,
++                                             NULL, NULL);
++  if (deploy_data != NULL)
++    {
++      g_set_error (error, FLATPAK_ERROR, FLATPAK_ERROR_ALREADY_INSTALLED,
++                   _("%s is currently deployed, you need to uninstall it first"), ref);
++      return FALSE;
++    }
++
++  return flatpak_dir_remove_ref (self, remote_name, ref, cancellable, error);
+ }
+ 
+ gboolean
+@@ -13941,7 +13983,7 @@ flatpak_dir_cleanup_undeployed_refs (FlatpakDir   *self,
+       FlatpakDecomposed *ref = g_ptr_array_index (undeployed_refs, i);
+       g_autofree gchar *remote = flatpak_decomposed_dup_remote (ref);
+ 
+-      if (!flatpak_dir_remove_ref (self, remote, flatpak_decomposed_get_ref (ref), cancellable, error))
++      if (!flatpak_dir_remove_undeployed_ref (self, remote, flatpak_decomposed_get_ref (ref), cancellable, error))
+         return FALSE;
+     }
+ 
+diff --git a/common/flatpak-installation.c b/common/flatpak-installation.c
+index fe5e575..2e43697 100644
+--- a/common/flatpak-installation.c
++++ b/common/flatpak-installation.c
+@@ -2911,8 +2911,10 @@ flatpak_installation_list_remote_related_refs_for_installed_sync (FlatpakInstall
+  * @error: return location for a #GError
+  *
+  * Remove the OSTree ref given by @remote_name:@ref from the local flatpak
+- * repository. The next time the underlying OSTree repo is pruned, objects
+- * which were attached to that ref will be removed. This is useful if you
++ * repository. The ref must not be currently deployed; attempting to remove
++ * a deployed ref will return an error. Use flatpak_installation_uninstall_full()
++ * to remove deployed refs. The next time the underlying OSTree repo is pruned,
++ * objects which were attached to that ref will be removed. This is useful if you
+  * pulled a flatpak ref using flatpak_installation_install_full() and
+  * specified %FLATPAK_INSTALL_FLAGS_NO_DEPLOY but then decided not to
+  * deploy the ref later on and want to remove the local ref to prevent it
+@@ -2936,7 +2938,7 @@ flatpak_installation_remove_local_ref_sync (FlatpakInstallation *self,
+   if (dir == NULL)
+     return FALSE;
+ 
+-  return flatpak_dir_remove_ref (dir, remote_name, ref, cancellable, error);
++  return flatpak_dir_remove_undeployed_ref (dir, remote_name, ref, cancellable, error);
+ }
+ 
+ /**
+diff --git a/system-helper/flatpak-system-helper.c b/system-helper/flatpak-system-helper.c
+index de56e84..f9ff1aa 100644
+--- a/system-helper/flatpak-system-helper.c
++++ b/system-helper/flatpak-system-helper.c
+@@ -1318,7 +1318,7 @@ handle_remove_local_ref (FlatpakSystemHelper   *object,
+       return G_DBUS_METHOD_INVOCATION_HANDLED;
+     }
+ 
+-  if (!flatpak_dir_remove_ref (system, arg_remote, arg_ref, NULL, &error))
++  if (!flatpak_dir_remove_undeployed_ref (system, arg_remote, arg_ref, NULL, &error))
+     {
+       flatpak_invocation_return_error (invocation, error, "Error removing ref");
+       return G_DBUS_METHOD_INVOCATION_HANDLED;

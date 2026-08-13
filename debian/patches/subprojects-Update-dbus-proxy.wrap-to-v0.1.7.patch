@@ -1,0 +1,25 @@
+From: Sebastian Wick <sebastian.wick@redhat.com>
+Date: Mon, 13 Apr 2026 15:53:16 +0200
+Subject: subprojects: Update dbus-proxy.wrap to v0.1.7
+
+Versions up to 0.1.6 contain a security vulnerability, so let's bump it
+to a version which does not.
+
+(cherry picked from commit 2b942431d28c71b4046c34010525f400a6cf4ac7):
+Origin: upstream, 1.16.7, commit:e39581a798987d96ed786854fca75606d13fe5d7
+---
+ subprojects/dbus-proxy.wrap | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/subprojects/dbus-proxy.wrap b/subprojects/dbus-proxy.wrap
+index 50127f3..29dcdce 100644
+--- a/subprojects/dbus-proxy.wrap
++++ b/subprojects/dbus-proxy.wrap
+@@ -1,5 +1,5 @@
+ [wrap-git]
+ url = https://github.com/flatpak/xdg-dbus-proxy
+-# 0.1.6
+-revision = 1c1989e56f94b9eb3b7567f8a6e8a0aa16cba496
++# 0.1.7
++revision = 6a170fa77e3cbecb48f9dd2478fe5c0a119eb467
+ depth = 1
